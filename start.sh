@@ -26,14 +26,11 @@ else
     echo "guest docker image already exists"
 fi
 
-# create docker network
+# stop any existing containers and remove the old network to avoid conflicts
 DOCKER_NET_NAME="attack_playground_net"
-if ! docker network inspect "$DOCKER_NET_NAME" &> /dev/null; then
-    echo "creating docker network \"$DOCKER_NET_NAME\"..."
-    docker network create --driver bridge --subnet=172.21.0.0/16 "$DOCKER_NET_NAME"
-else
-    echo "docker network already exists"
-fi
+echo "cleaning up existing containers and network..."
+docker compose down 2>/dev/null || true
+docker network rm "$DOCKER_NET_NAME" 2>/dev/null || true
 
 # apply network restrictions for the docker network
 echo "applying network restrictions for the docker network..."
