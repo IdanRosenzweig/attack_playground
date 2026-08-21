@@ -37,7 +37,7 @@ fi
 
 # apply network restrictions for the docker network
 echo "applying network restrictions for the docker network..."
-sudo python3 "$SCRIPT_DIR/scripts/setup_networking_linux.py"
+sudo env PYTHONPATH="$SCRIPT_DIR/scripts" python3 "$SCRIPT_DIR/scripts/setup_networking_linux.py"
 
 # launch services
 echo "launching services..."

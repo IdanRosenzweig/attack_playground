@@ -14,7 +14,7 @@ docker compose down
 
 # remove networking restrictions
 echo "removing network restrictions..."
-sudo python3 "$SCRIPT_DIR/scripts/teardown_networking_linux.py"
+sudo env PYTHONPATH="$SCRIPT_DIR/scripts" python3 "$SCRIPT_DIR/scripts/teardown_networking_linux.py"
 
 # print stopped
 echo "playground stopped"

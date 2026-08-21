@@ -5,7 +5,7 @@ apply iptables rules based on the config file.
 
 import sys
 import os
-from common import (
+from network_common_linux import (
     DOCKER_NET_NAME, CONFIG_FILE,
     get_bridge_interface, get_gateway_ip,
     iptables_cmd, rule_exists, add_rule,

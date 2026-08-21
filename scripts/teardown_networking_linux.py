@@ -5,7 +5,7 @@ remove iptables rules based on the config file.
 
 import os
 import subprocess
-from common import (
+from network_common_linux import (
     DOCKER_NET_NAME, CONFIG_FILE,
     get_bridge_interface, get_gateway_ip,
     remove_rule, parse_config, save_rules
