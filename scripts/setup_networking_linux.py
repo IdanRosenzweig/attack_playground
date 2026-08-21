@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-apply iptables rules based on allowed_ports.conf.
+apply iptables rules based on the config file.
 """
 
 import sys

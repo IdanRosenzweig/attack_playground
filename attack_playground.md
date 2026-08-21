@@ -9,4 +9,4 @@
 `restart.sh`: restart the playground
 `cleanup.sh`: stop and cleanup the playground
 
-`attack_network_endpoint.conf`: configuration file containing all the exposed attack network endpoints within the playground
+`attack_network_endpoints.conf`: configuration file containing all the exposed attack network endpoints within the playground

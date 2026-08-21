@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-remove iptables rules based on allowed_ports.conf.
+remove iptables rules based on the config file.
 """
 
 import os
@@ -45,7 +45,7 @@ def main():
         config_path = os.path.join(os.getcwd(), CONFIG_FILE)
 
     ranges = parse_config(config_path)
-    
+
     for rng in ranges:
         remove_rule(bridge_if, gateway_ip, rng)
 
