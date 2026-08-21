@@ -9,7 +9,7 @@ import re
 
 
 DOCKER_NET_NAME = "attack_playground_net"
-CONFIG_FILE = "allowed_ports.conf"
+CONFIG_FILE = "attack_network_endpoints.conf"
 
 def get_bridge_interface(network_name):
     """return the bridge interface name for the given docker network."""
