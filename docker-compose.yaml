@@ -1,6 +1,6 @@
 services:
   containerssh:
-    image: containerssh/containerssh:0.5.0
+    image: containerssh/containerssh:v0.5.0
     platform: linux/amd64
     container_name: containerssh
     restart: unless-stopped
