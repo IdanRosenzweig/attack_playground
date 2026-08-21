@@ -30,7 +30,7 @@ fi
 DOCKER_NET_NAME="attack_playground_net"
 if ! docker network inspect "$DOCKER_NET_NAME" &> /dev/null; then
     echo "creating docker network \"$DOCKER_NET_NAME\"..."
-    docker network create --driver bridge --subnet=172.20.0.0/16 "$DOCKER_NET_NAME"
+    docker network create --driver bridge --subnet=172.21.0.0/16 "$DOCKER_NET_NAME"
 else
     echo "docker network already exists"
 fi
