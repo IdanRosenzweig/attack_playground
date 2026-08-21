@@ -1,0 +1,22 @@
+ssh:
+  hostkeys:
+    - /var/secrets/host.key
+  listen: ":2222"
+
+auth:
+  url: "http://auth-config:8080"
+  password: true
+  pubkey: false
+
+backend: docker
+
+docker:
+  connection:
+    host: "unix:///var/run/docker.sock"
+  exec:
+    image: "attack_playground_image:latest"
+    network: "attack_playground_net"
+    cmd: ["/bin/bash"]
+    resources:
+      cpu_shares: 512
+      memory: 512M
