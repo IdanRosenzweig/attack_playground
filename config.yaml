@@ -10,19 +10,32 @@ log:
 docker:
   connection:
     host: "unix:///var/run/docker.sock"
+
   execution:
+    # NOTE ON KEY PLACEMENT / CASING (this is what silently broke the restriction):
+    # "container" is docker's container.Config, "host" is docker's container.HostConfig.
+    # Those docker structs carry no yaml tags, so containerssh (yaml.v3) matches them by
+    # the ALL-LOWERCASE go field name ("networkmode", not "networkMode"). Unknown or
+    # misplaced keys are silently ignored rather than rejected, so a key in the wrong
+    # place is a no-op and the container quietly falls back to the default bridge.
+    # Keys that belong to containerssh itself (imagePullPolicy, disableAgent, mode, ...)
+    # sit directly under "execution" and keep their documented camelCase spelling.
+
     container:
-      # image: containerssh/agent:latest
-
+      # container.Config
       image: "attack_playground_image:latest"
-      imagePullPolicy: "Never"
-      disableNetworking: false
-      disableAgent: true
 
-      networkMode: "attack_playground_net"
+    host:
+      # container.HostConfig.NetworkMode - attaches the guest to the restricted network.
+      networkmode: "attack_playground_net"
 
+      # container.HostConfig.Resources (embedded struct -> nested "resources" key).
+      # Memory is an int64 in bytes; "512M" would fail to parse here.
       resources:
-        memory: 512M
+        memory: 536870912 # 512 MiB
+
+    # containerssh-level options
+    imagePullPolicy: "Never"
 
 auth:
   password:
