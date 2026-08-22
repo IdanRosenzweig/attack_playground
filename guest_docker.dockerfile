@@ -1,3 +1,5 @@
+FROM containerssh/agent:latest AS agent-binary
+
 FROM ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -20,8 +22,11 @@ RUN apt update && apt install -y \
     wget \
     && rm -rf /var/lib/apt/lists/*
 
-# Create the user
+# Create the user (with bash as shell)
 RUN useradd -m guestuser
+
+# Copy the agent binary from the official image
+COPY --from=agent-binary /usr/bin/containerssh-agent /usr/bin/containerssh-agent
 
 USER guestuser
 WORKDIR /home/guestuser

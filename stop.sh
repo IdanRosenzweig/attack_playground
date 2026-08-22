@@ -10,7 +10,7 @@ echo "stopping playground..."
 
 # stop and delete all running containers
 GUEST_DOCKER_IMAGE_NAME="attack_playground_image:latest"
-docker rm -f $(docker ps -q --filter ancestor="$GUEST_DOCKER_IMAGE_NAME")
+docker rm -f $(docker ps -q --filter ancestor="$GUEST_DOCKER_IMAGE_NAME") || true
 
 # stop services
 echo "stopping services..."
