@@ -45,13 +45,12 @@ services:
       - ./host.key:/etc/containerssh/host.key:ro
       - /var/run/docker.sock:/var/run/docker.sock
 
-  auth-server:
+  containerssh-auth:
     image: python:3.11-slim
-    container_name: containerssh-auth
     restart: unless-stopped
     command: >
-      sh -c "pip install --no-cache-dir flask && python /app/auth-server.py"
+      sh -c "pip install --no-cache-dir flask && python /app/auth_server.py"
     volumes:
-      - ./auth-server.py:/app/auth-server.py:ro
+      - ./auth_server.py:/app/auth_server.py:ro
     ports:
-      - "8081:8080"
+      - "2223:8080"
