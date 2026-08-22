@@ -44,6 +44,8 @@ services:
       - ./config.yaml:/etc/containerssh/config.yaml:ro
       - ./host.key:/etc/containerssh/host.key:ro
       - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - containerssh_net
 
   containerssh-auth:
     image: python:3.11-slim
@@ -54,3 +56,9 @@ services:
       - ./auth_server.py:/app/auth_server.py:ro
     ports:
       - "2223:8080"
+    networks:
+      - containerssh_net
+
+networks:
+  containerssh_net:
+    driver: bridge
