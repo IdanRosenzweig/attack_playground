@@ -12,7 +12,6 @@ echo "starting playground..."
 if [ ! -f host.key ]; then
     echo "generating ssh host key..."
     ssh-keygen -t ed25519 -f ./host.key -N ""
-    chmod 600 host.key
 else
     echo "ssh host key already exists"
 fi
