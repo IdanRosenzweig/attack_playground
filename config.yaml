@@ -13,7 +13,7 @@ docker:
   execution:
     container:
       # image: containerssh/agent:latest
-      mage: "attack_playground_image:latest"
+      image: "attack_playground_image:latest"
       imagePullPolicy: "Never"
       disableNetworking: false
         # cmd: ["/bin/sh"]
