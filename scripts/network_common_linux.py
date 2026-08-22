@@ -2,22 +2,33 @@
 """
 common functions for iptables management of the playground docker network.
 
-the guest network ("attack_playground_net") is created with --internal, which already
-stops docker from routing the guest out to the internet. that alone is not enough:
-an internal network still leaves the host itself reachable on the bridge gateway ip,
-and that is where the attack endpoints live. so the allowlist has to be enforced in
-the INPUT chain.
+policy: a guest may open connections to the host on the tcp ports listed in
+attack_network_endpoints.conf, and to nothing else. no internet, no other host on
+the lan, no other docker network, and no other guest.
 
-two dedicated chains are used so that setup is idempotent and teardown is exact:
+the network ("attack_playground_net") is created with --internal, which already stops
+docker from routing the guest out to the internet. that alone is not enough:
+
+  * an internal network still leaves the host itself reachable on the bridge gateway
+    ip, and that is where the attack endpoints live - so the allowlist has to be
+    enforced in INPUT.
+  * guests on the same bridge can still reach each other - so intra-bridge traffic
+    has to be dropped explicitly.
+
+three dedicated chains are used so that setup is idempotent and teardown is exact:
 
   ATTACK_PG_INPUT   hooked from INPUT for "-i <bridge>"
-                    guest -> host traffic. only the tcp ports from the config file
-                    (on the gateway ip) are accepted, everything else is dropped.
+                    guest -> host. only the tcp ports from the config file (on the
+                    gateway ip) are accepted, everything else is dropped.
 
   ATTACK_PG_FWD     hooked from DOCKER-USER for "-i <bridge>"
-                    guest -> forwarded traffic. traffic staying inside the playground
-                    bridge is returned to docker's own rules, everything else is
-                    dropped. this backs up the --internal flag.
+                    guest -> forwarded. dropped outright. this covers guest-to-guest
+                    (same bridge), guest -> other docker network and guest -> lan.
+
+  ATTACK_PG_FWD_IN  hooked from DOCKER-USER for "-o <bridge>"
+                    forwarded -> guest. dropped, so no other host can reach a guest.
+                    the host itself is unaffected: host-originated traffic is routed
+                    through OUTPUT, not FORWARD.
 
 note that DOCKER-USER only ever sees FORWARDed packets, so a rule matching the
 gateway ip there can never fire - that is why the endpoint allowlist belongs in INPUT.
@@ -33,6 +44,9 @@ CONFIG_FILE = "attack_network_endpoints.conf"
 
 INPUT_CHAIN = "ATTACK_PG_INPUT"
 FORWARD_CHAIN = "ATTACK_PG_FWD"
+FORWARD_IN_CHAIN = "ATTACK_PG_FWD_IN"
+
+BRIDGE_NF_SYSCTL = "net.bridge.bridge-nf-call-iptables"
 
 
 def _privileged_prefix():
@@ -123,22 +137,24 @@ def delete_chain(chain):
     iptables_cmd(["-X", chain], ignore_error=True)
 
 
-def _hook_args(parent, bridge_if, chain):
-    return [parent, "-i", bridge_if, "-j", chain]
+def _hook_args(parent, bridge_if, chain, direction="-i"):
+    return [parent, direction, bridge_if, "-j", chain]
 
 
-def ensure_hook(parent, bridge_if, chain):
+def ensure_hook(parent, bridge_if, chain, direction="-i"):
     """insert the jump from the parent chain at the top, if not already present."""
-    if iptables_cmd(["-C"] + _hook_args(parent, bridge_if, chain), ignore_error=True):
+    args = _hook_args(parent, bridge_if, chain, direction)
+    if iptables_cmd(["-C"] + args, ignore_error=True):
         return False
-    iptables_cmd(["-I"] + _hook_args(parent, bridge_if, chain))
+    iptables_cmd(["-I"] + args)
     return True
 
 
-def remove_hook(parent, bridge_if, chain):
+def remove_hook(parent, bridge_if, chain, direction="-i"):
     """remove every copy of the jump from the parent chain."""
+    args = _hook_args(parent, bridge_if, chain, direction)
     removed = 0
-    while iptables_cmd(["-D"] + _hook_args(parent, bridge_if, chain), ignore_error=True):
+    while iptables_cmd(["-D"] + args, ignore_error=True):
         removed += 1
     return removed
 
@@ -147,6 +163,45 @@ def ensure_docker_user_chain():
     """DOCKER-USER is created by docker, but make sure it's there before hooking into it."""
     if not chain_exists("DOCKER-USER"):
         iptables_cmd(["-N", "DOCKER-USER"], ignore_error=True)
+
+
+# ----------------------------------------------------------- bridge netfilter
+
+def _sysctl_get(key):
+    try:
+        out = subprocess.check_output(_privileged_prefix() + ["sysctl", "-n", key],
+                                      text=True, stderr=subprocess.DEVNULL)
+        return out.strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+
+
+def ensure_bridge_netfilter():
+    """
+    make sure bridged traffic is actually handed to iptables.
+
+    traffic between two guests on the same bridge only traverses the FORWARD chain
+    when br_netfilter is loaded and net.bridge.bridge-nf-call-iptables is 1. if it
+    is not, the guest-to-guest DROP is silently a no-op and the guests can still
+    reach each other. docker normally sets this up itself, but do not rely on it -
+    a silent no-op here is exactly the failure mode this whole change is about.
+
+    returns True if bridge netfilter is on by the time we are done.
+    """
+    value = _sysctl_get(BRIDGE_NF_SYSCTL)
+
+    if value is None:
+        # the sysctl only appears once br_netfilter is loaded
+        subprocess.run(_privileged_prefix() + ["modprobe", "br_netfilter"],
+                       check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        value = _sysctl_get(BRIDGE_NF_SYSCTL)
+
+    if value == "1":
+        return True
+
+    subprocess.run(_privileged_prefix() + ["sysctl", "-w", f"{BRIDGE_NF_SYSCTL}=1"],
+                   check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return _sysctl_get(BRIDGE_NF_SYSCTL) == "1"
 
 
 # ------------------------------------------------------- legacy rule cleanup
