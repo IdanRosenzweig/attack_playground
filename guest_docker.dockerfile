@@ -4,6 +4,8 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt update && apt install -y \
     bash \
+    coreutils \
+    iputils-ping \
     netcat-openbsd \
     python2 \
     python3 \
@@ -18,8 +20,9 @@ RUN apt update && apt install -y \
     wget \
     && rm -rf /var/lib/apt/lists/*
 
-# create a symlink for "python" to python3
-RUN ln -s /usr/bin/python3 /usr/bin/python || true
+RUN useradd -m -s /bin/bash guestuser
 
-ENV SHELL=/bin/bash
+USER guestuser
+WORKDIR /home/guestuser
+
 CMD ["/bin/bash"]

@@ -1,22 +1,24 @@
 ssh:
+  banner: "Welcome to the Custom ContainerSSH Guest Environment!\n"
   hostkeys:
-    - /var/secrets/host.key
-  listen: ":2222"
-
-auth:
-  url: "http://auth-config:8080"
-  password: true
-  pubkey: false
+    - "/etc/containerssh/host.key"
 
 backend: docker
 
 docker:
   connection:
     host: "unix:///var/run/docker.sock"
-  exec:
-    image: "attack_playground_image:latest"
-    network: "attack_playground_net"
-    cmd: ["/bin/bash"]
-    resources:
-      cpu_shares: 512
-      memory: 512M
+  execution:
+    container:
+      image: "attack_playground_image:latest"
+      # Forces pulling 'never' or 'ifnotpresent' so it uses the locally built image
+      imagePullPolicy: "Never"
+      disableNetworking: false
+      cmd: ["/bin/bash"]
+      resources:
+        memory: 512M
+
+# Simple internal authentication allowing any username/password combination
+auth:
+  password:
+    enable: true

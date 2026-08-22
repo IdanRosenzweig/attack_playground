@@ -17,11 +17,11 @@ else
 fi
 
 # remove docker network
-DOCKER_NET_NAME="attack_playground_net"
-if docker network inspect "$DOCKER_NET_NAME" &> /dev/null; then
-    echo "removing docker network \"$DOCKER_NET_NAME\"..."
-    docker network rm "$DOCKER_NET_NAME"
-fi
+# DOCKER_NET_NAME="attack_playground_net"
+# if docker network inspect "$DOCKER_NET_NAME" &> /dev/null; then
+#     echo "removing docker network \"$DOCKER_NET_NAME\"..."
+#     docker network rm "$DOCKER_NET_NAME"
+# fi
 
 # remove docker image
 GUEST_DOCKER_IMAGE_NAME="attack_playground_image:latest"

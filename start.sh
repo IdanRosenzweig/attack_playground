@@ -11,7 +11,7 @@ echo "starting playground..."
 # ssh host key
 if [ ! -f host.key ]; then
     echo "generating ssh host key..."
-    openssl genrsa -out host.key 2048
+    ssh-keygen -t ed25519 -f ./host.key -N ""
     chmod 600 host.key
 else
     echo "ssh host key already exists"
@@ -27,10 +27,10 @@ else
 fi
 
 # stop any existing containers and remove the old network to avoid conflicts
-DOCKER_NET_NAME="attack_playground_net"
-echo "cleaning up existing containers and network..."
-docker compose down 2>/dev/null || true
-docker network rm "$DOCKER_NET_NAME" 2>/dev/null || true
+# DOCKER_NET_NAME="attack_playground_net"
+# echo "cleaning up existing containers and network..."
+# docker compose down 2>/dev/null || true
+# docker network rm "$DOCKER_NET_NAME" 2>/dev/null || true
 
 # launch services
 echo "launching services..."

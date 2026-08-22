@@ -1,34 +1,46 @@
+# services:
+#   containerssh:
+#     image: containerssh/containerssh:v0.5.0
+#     container_name: containerssh
+#     restart: unless-stopped
+#     ports:
+#       - "2222:2222"
+#     volumes:
+#       - ./config.yaml:/etc/containerssh/config.yaml:ro
+#       - ./host.key:/var/secrets/host.key:ro
+#       - /var/run/docker.sock:/var/run/docker.sock
+#     # networks:
+#     #   - attack_playground_net
+#     depends_on:
+#       - auth-config
+
+#   auth-config:
+#     image: containerssh/containerssh-test-authconfig:latest
+#     container_name: auth-config
+#     restart: unless-stopped
+#     # networks:
+#     #   - attack_playground_net
+#     environment:
+#       - CONTAINERSSH_ALLOW_ALL=true
+
+# # networks:
+# #   attack_playground_net:
+# #     name: attack_playground_net
+# #     driver: bridge
+# #     ipam:
+# #       config:
+# #         - subnet: 172.21.0.0/16
+
+
+
 services:
   containerssh:
-    image: containerssh/containerssh:v0.5.0
-    platform: linux/amd64
+    image: containerssh/containerssh:latest
     container_name: containerssh
     restart: unless-stopped
     ports:
       - "2222:2222"
     volumes:
       - ./config.yaml:/etc/containerssh/config.yaml:ro
-      - ./host.key:/var/secrets/host.key:ro
+      - ./host.key:/etc/containerssh/host.key:ro
       - /var/run/docker.sock:/var/run/docker.sock
-    networks:
-      - attack_playground_net
-    depends_on:
-      - auth-config
-
-  auth-config:
-    image: containerssh/containerssh-test-authconfig:latest
-    platform: linux/amd64
-    container_name: auth-config
-    restart: unless-stopped
-    networks:
-      - attack_playground_net
-    environment:
-      - CONTAINERSSH_ALLOW_ALL=true
-
-networks:
-  attack_playground_net:
-    name: attack_playground_net
-    driver: bridge
-    ipam:
-      config:
-        - subnet: 172.21.0.0/16
