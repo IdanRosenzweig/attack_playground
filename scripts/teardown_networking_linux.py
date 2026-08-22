@@ -1,56 +1,45 @@
 #!/usr/bin/env python3
 """
-remove iptables rules based on the config file.
+remove the network restrictions applied by setup_networking_linux.py.
 """
 
-import os
-import subprocess
 from network_common_linux import (
-    DOCKER_NET_NAME, CONFIG_FILE,
+    DOCKER_NET_NAME, INPUT_CHAIN, FORWARD_CHAIN,
     get_bridge_interface, get_gateway_ip,
-    remove_rule, parse_config, save_rules
+    remove_hook, delete_chain, remove_legacy_rules,
+    parse_config, find_config, save_rules,
 )
 
 
 def main():
     bridge_if = get_bridge_interface(DOCKER_NET_NAME)
     if not bridge_if:
-        print(f"info: network '{DOCKER_NET_NAME}' not found, skipping.")
+        # the network is already gone; the chains may still be around, so drop them
+        print(f"info: network '{DOCKER_NET_NAME}' not found, removing leftover chains.")
+        delete_chain(INPUT_CHAIN)
+        delete_chain(FORWARD_CHAIN)
+        save_rules()
         return
 
     gateway_ip = get_gateway_ip(DOCKER_NET_NAME)
-    if not gateway_ip:
-        print("warning: could not determine gateway ip, using default 172.20.0.1")
-        gateway_ip = "172.20.0.1"
 
-    print(f"removing iptables rules for interface {bridge_if}, gateway {gateway_ip}")
+    print(f"removing restrictions on {bridge_if}")
 
-    # remove drop rule (ignore if not present)
-    drop_cmd = ["sudo", "iptables", "-D", "DOCKER-USER", "-i", bridge_if, "-j", "DROP"]
-    subprocess.run(drop_cmd, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+    # unhook first, then the chains can be deleted
+    remove_hook("INPUT", bridge_if, INPUT_CHAIN)
+    remove_hook("DOCKER-USER", bridge_if, FORWARD_CHAIN)
 
-    # remove established/related rule
-    est_cmd = [
-        "sudo", "iptables", "-D", "DOCKER-USER",
-        "-i", bridge_if,
-        "-m", "state", "--state", "ESTABLISHED,RELATED",
-        "-j", "ACCEPT"
-    ]
-    subprocess.run(est_cmd, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+    delete_chain(INPUT_CHAIN)
+    delete_chain(FORWARD_CHAIN)
 
-    # remove accept rules from config
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    config_path = os.path.join(script_dir, CONFIG_FILE)
-    if not os.path.exists(config_path):
-        config_path = os.path.join(os.getcwd(), CONFIG_FILE)
-
-    ranges = parse_config(config_path)
-
-    for rng in ranges:
-        remove_rule(bridge_if, gateway_ip, rng)
+    # also clear anything left by older versions of the setup script
+    config_path = find_config()
+    ranges = parse_config(config_path) if config_path else []
+    remove_legacy_rules(bridge_if, gateway_ip, ranges)
 
     save_rules()
     print("cleanup complete.")
+
 
 if __name__ == "__main__":
     main()
