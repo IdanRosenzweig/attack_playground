@@ -5,15 +5,18 @@ ssh:
 
 backend: docker
 
+log:
+  level: "debug"
+
 docker:
   connection:
     host: "unix:///var/run/docker.sock"
   execution:
     container:
-      image: "attack_playground_image:latest"
-      # Forces pulling 'never' or 'ifnotpresent' so it uses the locally built image
-      imagePullPolicy: "Never"
-      disableNetworking: false
+      image: containerssh/agent:latest
+      # image: "attack_playground_image:latest"
+      # imagePullPolicy: "Never"
+      # disableNetworking: false
       cmd: ["/bin/bash"]
       resources:
         memory: 512M
