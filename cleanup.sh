@@ -31,10 +31,10 @@ if docker image inspect "$GUEST_DOCKER_IMAGE_NAME" &> /dev/null; then
 fi
 
 # remove ssh host key
-if [ -f host.key ]; then
-    echo "removing ssh host key..."
-    rm -f host.key
-fi
+# if [ -f host.key ]; then
+#     echo "removing ssh host key..."
+#     rm -f host.key
+# fi
 
 # print complete
 echo "cleanup complete"

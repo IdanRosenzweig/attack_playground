@@ -13,7 +13,7 @@ echo "stopping services..."
 docker compose down
 
 # remove networking restrictions
-echo "removing network restrictions..."
+# echo "removing network restrictions..."
 # sudo env PYTHONPATH="$SCRIPT_DIR/scripts" python3 "$SCRIPT_DIR/scripts/teardown_networking_linux.py"
 
 # print stopped
