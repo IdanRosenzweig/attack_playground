@@ -20,5 +20,8 @@ docker:
 
 # Simple internal authentication allowing any username/password combination
 auth:
+  url: "http://auth-server:8081/auth"
   password:
     enable: true
+  pubkey:
+    enable: false

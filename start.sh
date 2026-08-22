@@ -37,8 +37,8 @@ echo "launching services..."
 docker compose up -d
 
 # apply network restrictions for the docker network
-echo "applying network restrictions for the docker network..."
-sudo env PYTHONPATH="$SCRIPT_DIR/scripts" python3 "$SCRIPT_DIR/scripts/setup_networking_linux.py"
+# echo "applying network restrictions for the docker network..."
+# sudo env PYTHONPATH="$SCRIPT_DIR/scripts" python3 "$SCRIPT_DIR/scripts/setup_networking_linux.py"
 
 # print running
 echo "playground is running"
