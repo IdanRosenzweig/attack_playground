@@ -9,6 +9,7 @@ RUN apt update && apt install -y \
     coreutils \
     iputils-ping \
     netcat-openbsd \
+    iproute2 \
     python2 \
     python3 \
     python3-pip \
