@@ -31,17 +31,21 @@ fi
 # echo "cleaning up existing containers and network..."
 # docker compose down 2>/dev/null || true
 # docker network rm "$DOCKER_NET_NAME" 2>/dev/null || true
-
-# generate env file
-# source ./generate_containerssh_env.sh
+DOCKER_NET_NAME="attack_playground_net"
+if ! docker network inspect "$DOCKER_NET_NAME" &> /dev/null; then
+    echo "creating internal docker network \"$DOCKER_NET_NAME\"..."
+    docker network create --internal --driver bridge "$DOCKER_NET_NAME"
+else
+    echo "docker network \"$DOCKER_NET_NAME\" already exists"
+fi
 
 # launch services
 echo "launching services..."
 docker compose up -d
 
 # apply network restrictions for the docker network
-# echo "applying network restrictions for the docker network..."
-# sudo env PYTHONPATH="$SCRIPT_DIR/scripts" python3 "$SCRIPT_DIR/scripts/setup_networking_linux.py"
+echo "applying network restrictions for the docker network..."
+sudo env PYTHONPATH="$SCRIPT_DIR/scripts" python3 "$SCRIPT_DIR/scripts/setup_networking_linux.py"
 
 # print running
 echo "playground is running"
