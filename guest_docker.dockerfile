@@ -34,5 +34,6 @@ USER guestuser
 WORKDIR /home/guestuser
 
 # Set the agent as the container's entrypoint – it will spawn /bin/bash automatically
-ENTRYPOINT ["/usr/bin/containerssh-agent"]
+# ENTRYPOINT ["/usr/bin/containerssh-agent"]
+CMD ["console", "--", "/bin/bash"]
 # No CMD needed; the agent reads the user's shell from /etc/passwd

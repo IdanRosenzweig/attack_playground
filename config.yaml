@@ -15,8 +15,10 @@ docker:
       # image: containerssh/agent:latest
       image: "attack_playground_image:latest"
       imagePullPolicy: "Never"
+      keepAlive: true
       disableNetworking: false
         # cmd: ["/bin/sh"]
+      disableAgent: true
       resources:
         memory: 512M
 
