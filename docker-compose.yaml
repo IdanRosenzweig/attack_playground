@@ -38,6 +38,7 @@ services:
     image: containerssh/containerssh:latest
     container_name: containerssh
     restart: unless-stopped
+    user: "${CURRENT_UID:?Error: CURRENT_UID is not set. Run ./generate-env.sh first.}:${DOCKER_GID:?Error: DOCKER_GID is not set. Run ./generate-env.sh first.}"
     ports:
       - "2222:2222"
     volumes:

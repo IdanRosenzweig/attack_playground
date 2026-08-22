@@ -23,4 +23,4 @@ auth:
   password:
     method: webhook
     webhook:
-      url: "http://containerssh-auth:2023/auth"
+      url: "http://containerssh-auth:8080/auth"

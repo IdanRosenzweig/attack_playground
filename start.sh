@@ -32,6 +32,9 @@ fi
 # docker compose down 2>/dev/null || true
 # docker network rm "$DOCKER_NET_NAME" 2>/dev/null || true
 
+# generate env file
+source ./generate_containerssh_env.sh
+
 # launch services
 echo "launching services..."
 docker compose up -d
