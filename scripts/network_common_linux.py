@@ -32,10 +32,22 @@ three dedicated chains are used so that setup is idempotent and teardown is exac
 
 note that DOCKER-USER only ever sees FORWARDed packets, so a rule matching the
 gateway ip there can never fire - that is why the endpoint allowlist belongs in INPUT.
+
+the same three chain names are also used in ip6tables (a separate namespace) to drop
+every packet on the bridge - see the ipv6 section below.
+
+two invariants everything else here is built around:
+
+  * chains are never open. a chain is flushed and given its terminal DROP before any
+    allow rule goes in, so a rebuild that fails half way through leaves the guests
+    locked out rather than falling through to the (ACCEPT) policy of the parent chain.
+  * a rule that cannot fire is a bug, not a safety net. a chain nobody jumps to is
+    silently dead, so hooks are verified rather than assumed.
 """
 
 import os
 import re
+import shlex
 import subprocess
 
 
@@ -48,6 +60,29 @@ FORWARD_IN_CHAIN = "ATTACK_PG_FWD_IN"
 
 BRIDGE_NF_SYSCTL = "net.bridge.bridge-nf-call-iptables"
 
+IPTABLES = "iptables"
+IP6TABLES = "ip6tables"
+
+# built-in / docker chains that may hold a jump to one of our chains
+HOOK_PARENTS = ("INPUT", "FORWARD", "DOCKER-USER")
+
+MIN_PORT = 1
+MAX_PORT = 65535
+
+
+class IptablesError(RuntimeError):
+    """an iptables command failed. carries the tool's own stderr, which the caller needs."""
+
+    def __init__(self, binary, args, returncode, stderr):
+        self.binary = binary
+        self.args = list(args)
+        self.returncode = returncode
+        self.stderr = stderr
+        detail = stderr.strip() if stderr else "no error output"
+        super().__init__(
+            f"{binary} {' '.join(args)} failed (exit {returncode}): {detail}"
+        )
+
 
 def _privileged_prefix():
     """use sudo only when we are not already root (start.sh already runs us as root)."""
@@ -56,16 +91,44 @@ def _privileged_prefix():
     return ["sudo"]
 
 
-def iptables_cmd(args, ignore_error=False):
-    """run an iptables command. if ignore_error, don't raise."""
-    cmd = _privileged_prefix() + ["iptables"] + args
+def run_iptables(binary, args, ignore_error=False):
+    """
+    run an iptables/ip6tables command.
+
+    stderr is captured and carried on the exception rather than discarded: an
+    unexplained non-zero exit here used to surface as a bare CalledProcessError
+    traceback with the actual reason ("invalid port/service", "no chain by that
+    name", ...) thrown away.
+    """
+    cmd = _privileged_prefix() + [binary] + args
     try:
-        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return True
-    except subprocess.CalledProcessError:
+        proc = subprocess.run(cmd, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.PIPE, text=True)
+    except FileNotFoundError:
         if ignore_error:
             return False
-        raise
+        raise IptablesError(binary, args, 127, f"{binary} not found")
+
+    if proc.returncode == 0:
+        return True
+    if ignore_error:
+        return False
+    raise IptablesError(binary, args, proc.returncode, proc.stderr)
+
+
+def iptables_cmd(args, ignore_error=False):
+    """run an ipv4 iptables command. if ignore_error, don't raise."""
+    return run_iptables(IPTABLES, args, ignore_error=ignore_error)
+
+
+def ip6tables_cmd(args, ignore_error=False):
+    """run an ipv6 ip6tables command. if ignore_error, don't raise."""
+    return run_iptables(IP6TABLES, args, ignore_error=ignore_error)
+
+
+def ip6tables_available():
+    """true if ip6tables is installed and the kernel lets us talk to it."""
+    return run_iptables(IP6TABLES, ["-n", "-L", "INPUT"], ignore_error=True)
 
 
 def get_bridge_interface(network_name):
@@ -112,57 +175,138 @@ def get_subnet(network_name):
 def port_arg(port_range):
     """turn '1337-1355' into iptables' '1337:1355'. a bare port is passed through."""
     if '-' in port_range:
-        start, end = port_range.split('-')
+        start, end = port_range.split('-', 1)
         return f"{start}:{end}"
     return port_range
 
 
 # ---------------------------------------------------------------- chain helpers
 
-def chain_exists(chain):
-    return iptables_cmd(["-n", "-L", chain], ignore_error=True)
+def chain_exists(chain, binary=IPTABLES):
+    return run_iptables(binary, ["-n", "-L", chain], ignore_error=True)
 
 
-def ensure_chain(chain):
+def ensure_chain(chain, binary=IPTABLES):
     """create the chain if needed, then flush it so setup is idempotent."""
-    if not chain_exists(chain):
-        iptables_cmd(["-N", chain])
+    if not chain_exists(chain, binary):
+        run_iptables(binary, ["-N", chain])
     else:
-        iptables_cmd(["-F", chain])
+        run_iptables(binary, ["-F", chain])
 
 
-def delete_chain(chain):
-    """flush and delete the chain (ignore if it doesn't exist)."""
-    iptables_cmd(["-F", chain], ignore_error=True)
-    iptables_cmd(["-X", chain], ignore_error=True)
+def ensure_chain_closed(chain, binary=IPTABLES):
+    """
+    (re)create the chain in a deny-all state.
+
+    the terminal DROP goes in *before* any allow rule, and allow rules are then
+    inserted above it with insert_rule(). that way the chain denies by default at
+    every instant - during the rebuild window, and after a rebuild that raised part
+    way through. building the chain the other way round (allows first, DROP last)
+    means a single bad rule leaves a live hook pointing at a chain with no DROP,
+    and every guest packet falls through to the ACCEPT policy of INPUT.
+    """
+    ensure_chain(chain, binary)
+    run_iptables(binary, ["-A", chain, "-j", "DROP"])
+
+
+def insert_rule(chain, rule, position, binary=IPTABLES):
+    """insert a rule at `position`, i.e. above the chain's terminal DROP."""
+    run_iptables(binary, ["-I", chain, str(position)] + list(rule))
+
+
+def delete_chain(chain, binary=IPTABLES):
+    """
+    flush and delete the chain. returns True once the chain is gone.
+
+    a chain that is still referenced cannot be deleted, so callers must unhook it
+    first - see remove_all_hooks().
+    """
+    if not chain_exists(chain, binary):
+        return True
+    run_iptables(binary, ["-F", chain], ignore_error=True)
+    run_iptables(binary, ["-X", chain], ignore_error=True)
+    return not chain_exists(chain, binary)
 
 
 def _hook_args(parent, bridge_if, chain, direction="-i"):
     return [parent, direction, bridge_if, "-j", chain]
 
 
-def ensure_hook(parent, bridge_if, chain, direction="-i"):
+def ensure_hook(parent, bridge_if, chain, direction="-i", binary=IPTABLES):
     """insert the jump from the parent chain at the top, if not already present."""
     args = _hook_args(parent, bridge_if, chain, direction)
-    if iptables_cmd(["-C"] + args, ignore_error=True):
+    if run_iptables(binary, ["-C"] + args, ignore_error=True):
         return False
-    iptables_cmd(["-I"] + args)
+    run_iptables(binary, ["-I"] + args)
     return True
 
 
-def remove_hook(parent, bridge_if, chain, direction="-i"):
+def remove_hook(parent, bridge_if, chain, direction="-i", binary=IPTABLES):
     """remove every copy of the jump from the parent chain."""
     args = _hook_args(parent, bridge_if, chain, direction)
     removed = 0
-    while iptables_cmd(["-D"] + args, ignore_error=True):
+    while run_iptables(binary, ["-D"] + args, ignore_error=True):
         removed += 1
     return removed
 
 
+def _saved_rules(parent, binary=IPTABLES):
+    """`iptables -S <parent>` split into lines, or [] if the chain isn't there."""
+    try:
+        out = subprocess.check_output(_privileged_prefix() + [binary, "-S", parent],
+                                      text=True, stderr=subprocess.DEVNULL)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return []
+    return out.splitlines()
+
+
+def remove_all_hooks(chain, binary=IPTABLES):
+    """
+    remove every jump to `chain` from the parent chains, whatever interface it matches.
+
+    remove_hook() can only delete a hook whose bridge interface we can still name, and
+    by teardown time the docker network - and with it the bridge name - is often
+    already gone. without this the jump stays in INPUT forever: the chain gets flushed
+    but "-X" fails because it is still referenced, so the restrictions silently rot
+    into a growing pile of dangling rules that no later teardown can find.
+    """
+    removed = 0
+    for parent in HOOK_PARENTS:
+        if not chain_exists(parent, binary):
+            continue
+        for line in _saved_rules(parent, binary):
+            if not line.startswith("-A "):
+                continue
+            if not line.rstrip().endswith(f"-j {chain}"):
+                continue
+            args = shlex.split(line)
+            args[0] = "-D"
+            if run_iptables(binary, args, ignore_error=True):
+                removed += 1
+    return removed
+
+
 def ensure_docker_user_chain():
-    """DOCKER-USER is created by docker, but make sure it's there before hooking into it."""
+    """
+    make sure DOCKER-USER exists *and* is actually reached from FORWARD.
+
+    docker normally creates DOCKER-USER and inserts "-A FORWARD -j DOCKER-USER"
+    itself. if it has not (daemon not started yet, daemon restarted, iptables
+    flushed), simply creating the chain leaves it at 0 references - the guest ->
+    forwarded and forwarded -> guest DROPs are then a silent no-op and the guests
+    keep full lan/other-network reachability while setup happily reports success.
+
+    returns True if DOCKER-USER is reachable from FORWARD by the time we are done.
+    """
     if not chain_exists("DOCKER-USER"):
         iptables_cmd(["-N", "DOCKER-USER"], ignore_error=True)
+    if not chain_exists("DOCKER-USER"):
+        return False
+
+    if not iptables_cmd(["-C", "FORWARD", "-j", "DOCKER-USER"], ignore_error=True):
+        iptables_cmd(["-I", "FORWARD", "1", "-j", "DOCKER-USER"], ignore_error=True)
+
+    return iptables_cmd(["-C", "FORWARD", "-j", "DOCKER-USER"], ignore_error=True)
 
 
 # ----------------------------------------------------------- bridge netfilter
@@ -233,8 +377,22 @@ def remove_legacy_rules(bridge_if, gateway_ip, ranges):
 
 # ------------------------------------------------------------------- config io
 
+def _valid_port(value):
+    """true if `value` is a port number iptables will accept."""
+    try:
+        return MIN_PORT <= int(value) <= MAX_PORT
+    except ValueError:
+        return False
+
+
 def parse_config(config_path):
-    """read port ranges from config file, ignoring comments and blank lines."""
+    """
+    read port ranges from config file, ignoring comments and blank lines.
+
+    ports are range-checked here rather than left to iptables. "70000" or "1337-99999"
+    matches the digit patterns below but is rejected by iptables with "invalid
+    port/service", which used to abort the rebuild half way through the chain.
+    """
     if not os.path.exists(config_path):
         return []
 
@@ -249,12 +407,17 @@ def parse_config(config_path):
 
             # a single port specified
             if re.match(r'^\d+$', line):
-                ranges.append(line)
+                if _valid_port(line):
+                    ranges.append(line)
+                else:
+                    print(f"warning: port out of range ({MIN_PORT}-{MAX_PORT}): {line}")
 
             # port range specified
             elif re.match(r'^\d+-\d+$', line):
                 start, end = line.split('-')
-                if int(start) <= int(end):
+                if not (_valid_port(start) and _valid_port(end)):
+                    print(f"warning: port out of range ({MIN_PORT}-{MAX_PORT}): {line}")
+                elif int(start) <= int(end):
                     ranges.append(line)
                 else:
                     print(f"warning: invalid range (start > end): {line}")
