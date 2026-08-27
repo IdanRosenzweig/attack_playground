@@ -12,7 +12,11 @@ echo "starting playground..."
 if [ ! -f host.key ]; then
     echo "generating ssh host key..."
     ssh-keygen -t ed25519 -f ./host.key -N ""
-    chmod a+r ./host.key
+    # keep the private host key owner-only. the containerssh service runs as root
+    # (see docker-compose.yaml), so it can read it as is. if you switch that service
+    # back to a non-root uid, grant that uid access explicitly rather than making the
+    # key world readable - anyone who can read it can impersonate this ssh server.
+    chmod 600 ./host.key
 else
     echo "ssh host key already exists"
 fi
@@ -39,19 +43,31 @@ else
     echo "docker network \"$DOCKER_NET_NAME\" already exists"
 fi
 
+# apply network restrictions for the docker network.
+#
+# this runs *before* the services come up on purpose: containerssh starts accepting
+# ssh connections - and spawning guests on this network - the moment it is running,
+# so applying the restrictions afterwards leaves a window in which a guest is live
+# and unrestricted. the bridge exists as soon as the network is created, which is all
+# the setup script needs.
+echo "applying network restrictions for the docker network..."
+if ! sudo env PYTHONPATH="$SCRIPT_DIR/scripts" python3 "$SCRIPT_DIR/scripts/setup_networking_linux.py"; then
+    echo "error: failed to apply network restrictions, refusing to start the playground"
+    exit 1
+fi
+
 # launch services
 echo "launching services..."
 docker compose up -d
 
-# apply network restrictions for the docker network
-echo "applying network restrictions for the docker network..."
-sudo env PYTHONPATH="$SCRIPT_DIR/scripts" python3 "$SCRIPT_DIR/scripts/setup_networking_linux.py"
-
 # print running
 echo "playground is running"
 
-# print connection info
-HOST_IP=$(ip route get 1 | awk '{print $7; exit}')
+# print connection info.
+# "ip route get 1" prints "... dev <if> src <ip> uid <n>" for an on-link default route
+# and "... via <gw> dev <if> src <ip> uid <n>" otherwise, so pick the field after
+# "src" rather than a fixed column - $7 lands on the uid value for the on-link form.
+HOST_IP=$(ip route get 1 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "src") {print $(i + 1); exit}}')
 if [ -z "$HOST_IP" ]; then
     HOST_IP="localhost"
 fi
