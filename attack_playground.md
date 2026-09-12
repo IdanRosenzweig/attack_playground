@@ -11,6 +11,82 @@
 
 `attack_network_endpoints.conf`: configuration file containing all the exposed attack network endpoints within the playground
 
+`scripts/common.sh`: shared helpers for the lifecycle scripts - the host preflight,
+`as_root`, and compose resolution
+
+## host requirements
+
+the playground runs **on linux x86-64 only**. the guest
+restrictions are iptables chains on the host kernel's docker bridge, so the daemon has
+to be the host's own: on macos and windows docker runs inside its own vm and the chains
+would be applied to the wrong kernel, or to none at all. `start.sh` checks `uname` and
+refuses to start rather than bringing guests up unrestricted.
+
+on a fresh ubuntu/debian x64 host:
+
+| need                  | notes                                                              |
+| --------------------- | ------------------------------------------------------------------ |
+| docker engine         | `curl -fsSL https://get.docker.com \| sh`                            |
+| docker compose        | v2 plugin (`docker-compose-plugin`); the standalone v1 `docker-compose` also works |
+| python3               | stdlib only, no pip packages                                       |
+| iptables              | normally pulled in by docker-ce, but not on every host             |
+| root                  | either run as root, or as a user with sudo                         |
+| docker socket access  | `sudo usermod -aG docker $USER && newgrp docker`, or run as root    |
+| x86-64                | required - see below                                               |
+
+`start.sh` verifies all of the above **before** it creates the host key, the guest image
+or the network, and prints the fix for whatever is missing. running as root on a minimal
+image with no sudo installed is supported - `as_root` in `scripts/common.sh` only reaches
+for sudo when it is not already root.
+
+### why x86-64 specifically
+
+this is not a preference. `containerssh/containerssh` is published for **linux/amd64
+only**. on any other architecture docker pulls the amd64 image anyway and the container
+restart-loops on
+
+```
+exec /containerssh: exec format error
+```
+
+while `docker compose up -d` still exits 0 - so without a check the playground reports
+itself as running with nothing listening on port 2222. verified on an aarch64 ubuntu
+24.04 host. the preflight fails on a non-x86-64 host unless the qemu-user binfmt
+handlers are registered (`docker run --privileged --rm tonistiigi/binfmt --install
+amd64`), in which case it says the emulation is in use and carries on.
+
+guest containers themselves are built from `guest_docker.dockerfile` for the host's
+architecture, so on an x86-64 host they are x86-64 and prebuilt x86-64 tooling runs in
+them.
+
+### start is not "containers created"
+
+`docker compose up -d` exits 0 once the containers exist, which says nothing about
+whether they stayed up. `start.sh` therefore waits for containerssh to actually accept
+tcp on 2222 before printing `playground is running`, and dumps the container logs and
+exits non-zero if it never does. a crash-looping service - wrong image architecture, bad
+config, an unreadable host key - is a loud failure rather than a playground that is
+advertised as working.
+
+### docker's firewall backend
+
+docker 29 can be told to program nftables directly (`"firewall-backend": "nftables"`),
+and in that mode it maintains **no `DOCKER-USER` chain at all**. the forward drops then
+hang off a `DOCKER-USER` chain that `setup_networking_linux.py` creates and hooks into
+`FORWARD` itself. the kernel still evaluates them - a `DROP` is a `DROP` whichever table
+it lives in - but their ordering against docker's own rules is no longer ours to control,
+so the preflight warns and the rules should be verified by hand (see *verifying* below).
+the default iptables backend needs none of this.
+
+### the auth webhook
+
+`containerssh-auth` authenticates *anybody* as whatever username they ask for - that is
+the point of a playground, but it means the port must not be reachable from the lan. it
+is published on `127.0.0.1:2223` only. note that a docker published port is DNATed in the
+`nat` table before ufw or firewalld ever sees it, so binding it to `0.0.0.0` would expose
+it regardless of the host firewall. containerssh itself reaches the webhook by service
+name on `containerssh_net` and does not need the published port at all.
+
 ## network restrictions
 
 **policy: a guest may open connections to the host on the tcp ports listed in
@@ -104,7 +180,14 @@ also clears the flat `DOCKER-USER` rules written by earlier versions.
 
 ### verifying
 
-after `./start.sh`, check the rules on the host:
+`./verify.sh` runs the host checks below and reports pass/fail: the unit tests,
+`start.sh`, every chain and its terminal `DROP`, the hooks, the ipv6 mirror, the
+sysctl and the loopback binding. `./verify_guest.sh` then proves the policy from
+inside real guest containers. both need `sshpass` and `netcat-openbsd` on the host,
+and a playground that is not already running. a probe that could not run is
+reported as "not tested" rather than as a pass.
+
+to check by hand instead, after `./start.sh`, check the rules on the host:
 
 ```
 sudo iptables -n -L ATTACK_PG_INPUT          # must end in DROP
@@ -136,3 +219,7 @@ only and need neither root nor docker:
 ```
 python3 -m unittest discover -s scripts -p 'test_*.py'
 ```
+
+the shell helpers in `scripts/common.sh` are covered too - those tests stub every
+external command on `PATH`, so they behave the same on a developer laptop as on
+the deployment host.
