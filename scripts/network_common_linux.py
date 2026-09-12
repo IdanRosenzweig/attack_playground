@@ -107,7 +107,11 @@ def run_iptables(binary, args, ignore_error=False):
     except FileNotFoundError:
         if ignore_error:
             return False
-        raise IptablesError(binary, args, 127, f"{binary} not found")
+        # cmd[0] is "sudo" when we are not root, so report whichever binary is
+        # actually missing. a host with no sudo installed (a root shell on a
+        # minimal image, where this script is run by hand rather than by
+        # start.sh) otherwise gets told that iptables is missing when it is not.
+        raise IptablesError(binary, args, 127, f"{cmd[0]} not found")
 
     if proc.returncode == 0:
         return True

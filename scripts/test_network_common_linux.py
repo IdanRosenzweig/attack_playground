@@ -113,5 +113,28 @@ class FailClosedTest(unittest.TestCase):
         self.assertEqual(positions, sorted(positions))
 
 
+class MissingBinaryTest(unittest.TestCase):
+    """the error has to name the binary that is actually missing."""
+
+    def test_missing_sudo_is_not_reported_as_missing_iptables(self):
+        with mock.patch.object(nc.os, "geteuid", return_value=1000), \
+                mock.patch.object(nc.subprocess, "run", side_effect=FileNotFoundError):
+            with self.assertRaises(nc.IptablesError) as caught:
+                nc.run_iptables(nc.IPTABLES, ["-n", "-L", "INPUT"])
+        self.assertIn("sudo not found", str(caught.exception))
+
+    def test_missing_iptables_is_reported_as_such_when_root(self):
+        with mock.patch.object(nc.os, "geteuid", return_value=0), \
+                mock.patch.object(nc.subprocess, "run", side_effect=FileNotFoundError):
+            with self.assertRaises(nc.IptablesError) as caught:
+                nc.run_iptables(nc.IPTABLES, ["-n", "-L", "INPUT"])
+        self.assertIn("iptables not found", str(caught.exception))
+
+    def test_ignore_error_still_swallows_it(self):
+        with mock.patch.object(nc.subprocess, "run", side_effect=FileNotFoundError):
+            self.assertFalse(
+                nc.run_iptables(nc.IPTABLES, ["-n", "-L", "INPUT"], ignore_error=True))
+
+
 if __name__ == "__main__":
     unittest.main()
