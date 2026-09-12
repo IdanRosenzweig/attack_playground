@@ -61,8 +61,10 @@ services:
   containerssh-auth:
     image: python:3.11-slim
     restart: unless-stopped
-    command: >
-      sh -c "pip install --no-cache-dir flask && python /app/auth_server.py"
+    # no pip install: auth_server.py is stdlib only, so this container needs no
+    # network when it starts and is serving within a second of being created.
+    # -u so its request log is not stuck in a buffer when you go looking for it.
+    command: ["python", "-u", "/app/auth_server.py"]
     volumes:
       - ./auth_server.py:/app/auth_server.py:ro
     # ready means "the webhook is actually listening", not "the container exists".
@@ -70,10 +72,10 @@ services:
     healthcheck:
       test: ["CMD", "python", "-c",
              "import socket; socket.create_connection(('127.0.0.1', 8080), 2).close()"]
-      interval: 5s
-      timeout: 5s
-      retries: 60
-      start_period: 10s
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 2s
     ports:
       # bound to loopback on purpose. this webhook authenticates *anybody* as any
       # username they ask for, and on a linux host a published port is DNATed in the

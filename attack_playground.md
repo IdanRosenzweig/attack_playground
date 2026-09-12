@@ -87,6 +87,18 @@ is published on `127.0.0.1:2223` only. note that a docker published port is DNAT
 it regardless of the host firewall. containerssh itself reaches the webhook by service
 name on `containerssh_net` and does not need the published port at all.
 
+`auth_server.py` is stdlib only (`http.server`). it used to be a flask app whose
+container ran `pip install flask` on every start, which meant the auth service needed
+working network access each time it booted, and that containerssh - which is held back
+until the webhook is healthy - could not start until that install finished. the webhook
+now serves within a second of the container being created and works with no network at
+all.
+
+it answers `POST /auth/password` and `POST /auth/pubkey` with
+`{"success": true, "authenticatedUsername": "<whatever was asked for>"}`. a missing or
+malformed body falls back to `guestuser` rather than failing: this webhook says yes to
+everyone by design, and a rejected login reads as a broken playground.
+
 ## network restrictions
 
 **policy: a guest may open connections to the host on the tcp ports listed in
