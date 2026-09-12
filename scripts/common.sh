@@ -60,6 +60,13 @@ compose() {
     "${COMPOSE_CMD[@]}" "$@"
 }
 
+# ------------------------------------------------------------------------- binfmt
+#
+# where the kernel registers the qemu-user handler for amd64 binaries. a variable
+# rather than a literal so the preflight's two architecture branches can both be
+# exercised by the tests.
+BINFMT_AMD64="${BINFMT_AMD64:-/proc/sys/fs/binfmt_misc/qemu-x86_64}"
+
 # ----------------------------------------------------------------------- preflight
 #
 # check everything the playground needs *before* doing any work. the network
@@ -80,6 +87,27 @@ preflight() {
         echo "       the guest restrictions are iptables chains on the host kernel's" >&2
         echo "       docker bridge, which a docker desktop vm does not give access to." >&2
         return 1
+    fi
+
+    # the playground needs an x86-64 host. this is not a preference: the
+    # containerssh/containerssh image is published for linux/amd64 only, so on any
+    # other architecture docker pulls the amd64 image anyway and the container dies
+    # in a restart loop with "exec /containerssh: exec format error" - while
+    # "docker compose up -d" still exits 0 and everything looks fine.
+    local arch
+    arch="$(uname -m)"
+    if [ "$arch" != "x86_64" ]; then
+        if [ -e "$BINFMT_AMD64" ]; then
+            echo "note: host is $arch. containerssh is published for linux/amd64 only and"
+            echo "      will run here under binfmt/qemu emulation, slowly."
+        else
+            echo "error: host architecture is $arch, but containerssh/containerssh is" >&2
+            echo "       published for linux/amd64 only - it exits with 'exec format error'" >&2
+            echo "       on this host. use an x86-64 host, or register the qemu-user binfmt" >&2
+            echo "       handlers first:" >&2
+            echo "       docker run --privileged --rm tonistiigi/binfmt --install amd64" >&2
+            failed=1
+        fi
     fi
 
     if ! command -v docker > /dev/null 2>&1; then

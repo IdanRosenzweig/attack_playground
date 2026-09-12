@@ -87,12 +87,13 @@ class ShellHelperTest(unittest.TestCase):
 
         return stubs
 
-    def run_snippet(self, snippet, **kwargs):
+    def run_snippet(self, snippet, env=None, **kwargs):
         stubs = self.make_stubs(**kwargs)
+        environ = {"PATH": stubs, "HOME": os.environ.get("HOME", "/tmp")}
+        environ.update(env or {})
         return subprocess.run(
             [BASH, "-c", f'source "{COMMON_SH}"\n{snippet}'],
-            env={"PATH": stubs, "HOME": os.environ.get("HOME", "/tmp")},
-            capture_output=True, text=True,
+            env=environ, capture_output=True, text=True,
         )
 
 
@@ -141,6 +142,26 @@ class PreflightTest(ShellHelperTest):
             "preflight", present=self.READY, docker_info=1)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("docker", result.stderr.lower())
+
+    def test_non_x86_host_without_emulation_is_fatal(self):
+        # verified on a real aarch64 host: containerssh/containerssh is published
+        # for linux/amd64 only, so docker pulls the amd64 image anyway and the
+        # container restart-loops on "exec format error" while compose still
+        # exits 0. that has to stop the launch, not warn about it.
+        result = self.run_snippet("preflight", present=self.READY, machine="aarch64")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("aarch64", result.stderr)
+        self.assertIn("linux/amd64 only", result.stderr)
+
+    def test_non_x86_host_with_binfmt_is_allowed(self):
+        # an operator who has registered the qemu-user handlers can run it anyway
+        marker = os.path.join(tempfile.mkdtemp(), "qemu-x86_64")
+        self.addCleanup(shutil.rmtree, os.path.dirname(marker))
+        open(marker, "w").close()
+        result = self.run_snippet("preflight", present=self.READY, machine="aarch64",
+                                  env={"BINFMT_AMD64": marker})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("emulation", result.stdout)
 
     def test_nftables_backend_is_flagged(self):
         # docker 29 can program nftables directly, and maintains no DOCKER-USER
