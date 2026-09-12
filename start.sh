@@ -72,6 +72,19 @@ fi
 echo "launching services..."
 compose up -d
 
+# "compose up -d" only means the containers were created. wait until containerssh
+# is actually accepting ssh, so a service that came up and died immediately is a
+# loud failure rather than a playground that is advertised as running with nothing
+# listening on it.
+echo "waiting for containerssh to accept connections..."
+if ! wait_for_tcp 127.0.0.1 2222 60; then
+    echo "error: containerssh is not accepting connections on port 2222."
+    echo "       the containers were created but the playground is not usable."
+    echo "--- containerssh logs ---"
+    compose logs --tail 20 containerssh 2>&1 | tail -20
+    exit 1
+fi
+
 # print running
 echo "playground is running"
 

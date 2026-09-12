@@ -14,6 +14,7 @@ stdlib only, no docker/iptables/root needed. run with:
 
 import os
 import shutil
+import socket
 import subprocess
 import tempfile
 import unittest
@@ -26,7 +27,7 @@ BASH = shutil.which("bash") or "/bin/bash"
 
 # commands the helpers call that the stubs should not fake - pass them straight
 # through to the real binary so the tests exercise the real control flow
-PASSTHROUGH = ("id", "grep", "uniq", "cat", "echo")
+PASSTHROUGH = ("id", "grep", "uniq", "cat", "echo", "sleep")
 
 
 def _write_stub(directory, name, body):
@@ -192,6 +193,31 @@ class ComposeTest(ShellHelperTest):
                                   compose_v2=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("docker-compose", result.stderr)
+
+
+class WaitForTcpTest(ShellHelperTest):
+    """start.sh must not call a crash-looping service a running playground."""
+
+    def test_returns_immediately_when_the_port_is_open(self):
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        self.addCleanup(listener.close)
+        port = listener.getsockname()[1]
+
+        result = self.run_snippet(f"wait_for_tcp 127.0.0.1 {port} 5")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_times_out_when_nothing_is_listening(self):
+        # this is the containerssh-crash-loop case: the container exists, the port
+        # never opens, and start.sh has to fail instead of reporting success
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        probe.close()
+
+        result = self.run_snippet(f"wait_for_tcp 127.0.0.1 {port} 2")
+        self.assertNotEqual(result.returncode, 0)
 
 
 class AsRootTest(ShellHelperTest):

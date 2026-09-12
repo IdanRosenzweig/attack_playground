@@ -168,3 +168,23 @@ preflight() {
 
     return $failed
 }
+
+# ------------------------------------------------------------- service readiness
+#
+# "docker compose up -d" exits 0 once the containers are *created*, which says
+# nothing about whether they stayed up. a containerssh that crash-loops (wrong
+# image architecture, bad config, unreadable host key) otherwise leaves start.sh
+# cheerfully printing "playground is running" while nothing is listening.
+#
+# bash's /dev/tcp keeps this dependency free - no nc, no ss.
+wait_for_tcp() {
+    local host="$1" port="$2" timeout="${3:-60}" waited=0
+    while [ "$waited" -lt "$timeout" ]; do
+        if (exec 3<>"/dev/tcp/$host/$port") 2> /dev/null; then
+            return 0
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    return 1
+}
