@@ -48,6 +48,15 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     networks:
       - containerssh_net
+    # containerssh starts accepting ssh the moment it is up, but it cannot
+    # authenticate anyone until the webhook answers - and the auth service installs
+    # flask at container start, which takes a while on first run. without this gate
+    # every login during that window fails with
+    #   HTTP POST .../auth/password failed (dial tcp ...:8080: connect: connection refused)
+    # and the playground looks broken to whoever connects first.
+    depends_on:
+      containerssh-auth:
+        condition: service_healthy
 
   containerssh-auth:
     image: python:3.11-slim
@@ -56,6 +65,15 @@ services:
       sh -c "pip install --no-cache-dir flask && python /app/auth_server.py"
     volumes:
       - ./auth_server.py:/app/auth_server.py:ro
+    # ready means "the webhook is actually listening", not "the container exists".
+    # stdlib only - python:3.11-slim has no curl or nc.
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import socket; socket.create_connection(('127.0.0.1', 8080), 2).close()"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 10s
     ports:
       - "2223:8080"
     networks:

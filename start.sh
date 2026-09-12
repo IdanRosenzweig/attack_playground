@@ -76,8 +76,10 @@ compose up -d
 # is actually accepting ssh, so a service that came up and died immediately is a
 # loud failure rather than a playground that is advertised as running with nothing
 # listening on it.
+# generous: on the first run the auth service has to install flask before
+# containerssh is allowed to start at all (see depends_on in docker-compose.yaml).
 echo "waiting for containerssh to accept connections..."
-if ! wait_for_tcp 127.0.0.1 2222 60; then
+if ! wait_for_tcp 127.0.0.1 2222 240; then
     echo "error: containerssh is not accepting connections on port 2222."
     echo "       the containers were created but the playground is not usable."
     echo "--- containerssh logs ---"
