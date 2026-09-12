@@ -75,7 +75,13 @@ services:
       retries: 60
       start_period: 10s
     ports:
-      - "2223:8080"
+      # bound to loopback on purpose. this webhook authenticates *anybody* as any
+      # username they ask for, and on a linux host a published port is DNATed in the
+      # nat table before ufw/firewalld ever sees it - "0.0.0.0:2223" would hand the
+      # whole lan a way to mint sessions. containerssh reaches it by service name on
+      # containerssh_net and does not need the published port at all; it is kept
+      # only so the operator can curl it while debugging.
+      - "127.0.0.1:2223:8080"
     networks:
       - containerssh_net
 
