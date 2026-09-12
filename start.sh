@@ -5,6 +5,18 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# shellcheck source=scripts/common.sh
+source "$SCRIPT_DIR/scripts/common.sh"
+
+# check the host can actually run the playground before creating anything. the
+# guest restrictions are the whole point here, so a host that cannot apply them
+# must not end up running guests - bail out before the host key, the image and
+# the network exist rather than half way through.
+if ! preflight; then
+    echo "error: host is not ready to run the playground, refusing to start"
+    exit 1
+fi
+
 # print starting
 echo "starting playground..."
 
@@ -51,14 +63,14 @@ fi
 # and unrestricted. the bridge exists as soon as the network is created, which is all
 # the setup script needs.
 echo "applying network restrictions for the docker network..."
-if ! sudo env PYTHONPATH="$SCRIPT_DIR/scripts" python3 "$SCRIPT_DIR/scripts/setup_networking_linux.py"; then
+if ! as_root env PYTHONPATH="$SCRIPT_DIR/scripts" python3 "$SCRIPT_DIR/scripts/setup_networking_linux.py"; then
     echo "error: failed to apply network restrictions, refusing to start the playground"
     exit 1
 fi
 
 # launch services
 echo "launching services..."
-docker compose up -d
+compose up -d
 
 # print running
 echo "playground is running"

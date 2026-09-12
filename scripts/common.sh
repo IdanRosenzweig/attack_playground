@@ -1,0 +1,142 @@
+#!/bin/bash
+#
+# shared helpers for the playground lifecycle scripts (start/stop/restart/cleanup).
+# meant to be sourced, not executed:
+#
+#     source "$SCRIPT_DIR/scripts/common.sh"
+#
+# everything here exists because the playground is deployed on a plain linux host
+# rather than on the machine it is developed on. the failure modes below are all
+# ones that otherwise surface half way through start.sh - after the host key and the
+# guest image have already been created - as an opaque error from docker or python.
+
+# ---------------------------------------------------------------- running as root
+#
+# the iptables scripts need root. two host layouts have to work:
+#
+#   * an unprivileged user with sudo (the common case, "./start.sh")
+#   * root with no sudo installed at all (minimal debian images, cloud-init, a
+#     root shell over ssh). "sudo python3 ..." is not a no-op there, it is a
+#     "command not found" that kills the script.
+#
+# as_root runs its arguments with the smallest thing that works.
+as_root() {
+    if [ "$(id -u)" -eq 0 ]; then
+        "$@"
+    elif command -v sudo > /dev/null 2>&1; then
+        sudo "$@"
+    else
+        echo "error: need root to run '$1' but this is not root and sudo is not installed" >&2
+        return 1
+    fi
+}
+
+# ------------------------------------------------------------------ docker compose
+#
+# compose v2 is a docker cli plugin ("docker compose"); the standalone v1 script
+# ("docker-compose") is what you get from the distro packages on debian/ubuntu when
+# docker.io is installed instead of docker-ce. resolve once and reuse.
+COMPOSE_CMD=()
+
+resolve_compose() {
+    if [ ${#COMPOSE_CMD[@]} -gt 0 ]; then
+        return 0
+    fi
+    if docker compose version > /dev/null 2>&1; then
+        COMPOSE_CMD=(docker compose)
+    elif command -v docker-compose > /dev/null 2>&1; then
+        COMPOSE_CMD=(docker-compose)
+    else
+        return 1
+    fi
+    return 0
+}
+
+compose() {
+    if ! resolve_compose; then
+        echo "error: neither 'docker compose' nor 'docker-compose' is available" >&2
+        return 1
+    fi
+    "${COMPOSE_CMD[@]}" "$@"
+}
+
+# ----------------------------------------------------------------------- preflight
+#
+# check everything the playground needs *before* doing any work. the network
+# restrictions are the whole point of this playground, so a host that cannot apply
+# them must not end up running guests: start.sh refuses rather than degrading.
+preflight() {
+    local failed=0
+
+    # linux only. the restrictions are iptables chains on a docker bridge; neither
+    # exists on macos (docker desktop runs the daemon inside its own vm, so the
+    # chains would be applied to the wrong kernel - or to none at all) or on
+    # windows. fail here rather than letting setup_networking_linux.py report a
+    # missing network and leave the operator guessing.
+    local kernel
+    kernel="$(uname -s)"
+    if [ "$kernel" != "Linux" ]; then
+        echo "error: this playground only runs on linux (detected: $kernel)." >&2
+        echo "       the guest restrictions are iptables chains on the host kernel's" >&2
+        echo "       docker bridge, which a docker desktop vm does not give access to." >&2
+        return 1
+    fi
+
+    if ! command -v docker > /dev/null 2>&1; then
+        echo "error: docker is not installed. on ubuntu/debian:" >&2
+        echo "       curl -fsSL https://get.docker.com | sh" >&2
+        failed=1
+    elif ! docker info > /dev/null 2>&1; then
+        # either the daemon is down or this user cannot reach the socket. those need
+        # different fixes, so tell them apart instead of printing a generic error.
+        if as_root docker info > /dev/null 2>&1; then
+            echo "error: cannot reach the docker daemon as '$(id -un)', but root can." >&2
+            echo "       add yourself to the docker group and log back in:" >&2
+            echo "       sudo usermod -aG docker $(id -un) && newgrp docker" >&2
+        else
+            echo "error: the docker daemon is not reachable. is it running?" >&2
+            echo "       sudo systemctl start docker" >&2
+        fi
+        failed=1
+    fi
+
+    if ! resolve_compose; then
+        echo "error: docker compose is not available. on ubuntu/debian:" >&2
+        echo "       sudo apt-get install -y docker-compose-plugin" >&2
+        failed=1
+    fi
+
+    if ! command -v python3 > /dev/null 2>&1; then
+        echo "error: python3 is not installed (needed by the networking scripts). on ubuntu/debian:" >&2
+        echo "       sudo apt-get install -y python3" >&2
+        failed=1
+    fi
+
+    # iptables comes in as a docker-ce dependency on most hosts, but not on every
+    # one - and without it there are no restrictions at all.
+    if ! command -v iptables > /dev/null 2>&1 && ! as_root test -x /usr/sbin/iptables 2> /dev/null; then
+        echo "error: iptables is not installed (needed to restrict the guest network). on ubuntu/debian:" >&2
+        echo "       sudo apt-get install -y iptables" >&2
+        failed=1
+    fi
+
+    if [ "$(id -u)" -ne 0 ] && ! command -v sudo > /dev/null 2>&1; then
+        echo "error: not running as root and sudo is not installed; the network" >&2
+        echo "       restrictions cannot be applied. run as root or install sudo." >&2
+        failed=1
+    fi
+
+    # docker 29 can be configured to program nftables directly instead of iptables.
+    # in that mode docker maintains no DOCKER-USER chain at all, so the forward
+    # drops end up hanging off a chain this script creates itself rather than off
+    # docker's. the kernel still evaluates them - a DROP is a DROP whichever table
+    # it lives in - but the ordering against docker's own rules is no longer
+    # something we control, so say so out loud.
+    if docker info 2> /dev/null | grep -qi 'firewall.*backend.*nftables'; then
+        echo "warning: the docker daemon is using the nftables firewall backend."
+        echo "         docker maintains no DOCKER-USER chain in that mode; the guest"
+        echo "         forward drops still apply, but verify them by hand after start."
+    fi
+
+    return $failed
+}
