@@ -427,6 +427,87 @@ def remove_legacy_rules(bridge_if, gateway_ip, ranges):
     return removed
 
 
+# ------------------------------------------------- published endpoint shadowing
+
+def range_bounds(port_range):
+    """turn '1337-1355' (or a bare '1337') into an inclusive (start, end) pair."""
+    if '-' in port_range:
+        start, end = port_range.split('-', 1)
+        return int(start), int(end)
+    port = int(port_range)
+    return port, port
+
+
+_DNAT_DPORT_RE = re.compile(r"--dport\s+(\d+)")
+_DNAT_TARGET_RE = re.compile(r"--to-destination\s+(\S+)")
+_DNAT_BIND_RE = re.compile(r"\s-d\s+(\d+\.\d+\.\d+\.\d+)")
+
+
+def parse_published_ports(rules):
+    """
+    pull (host_port, destination) out of docker's published-port DNAT rules.
+
+    docker writes one rule per published port into nat/DOCKER:
+
+      -A DOCKER ! -i br-x -p tcp -m tcp --dport 1337 -j DNAT --to-destination 172.18.0.15:1337
+
+    a publish bound to loopback ("-d 127.0.0.1/32", i.e. "127.0.0.1:2223:8080") can
+    never be hit from the bridge, so it is not a conflict and is skipped here.
+    """
+    published = []
+    for line in rules:
+        if "-j DNAT" not in line:
+            continue
+        dport = _DNAT_DPORT_RE.search(line)
+        target = _DNAT_TARGET_RE.search(line)
+        if not dport or not target:
+            continue
+        bind = _DNAT_BIND_RE.search(line)
+        if bind and bind.group(1).startswith("127."):
+            continue
+        published.append((int(dport.group(1)), target.group(1)))
+    return published
+
+
+def endpoint_conflicts(ranges, published):
+    """
+    published container ports that fall inside a configured endpoint range.
+
+    such a port is not an endpoint on the host at all. nat/PREROUTING runs *before*
+    the routing decision, so a guest packet to <gateway>:<port> is rewritten to the
+    container and forwarded - it never reaches INPUT, and so never reaches
+    ATTACK_PG_INPUT. a host process listening on that port of the gateway is
+    shadowed: it keeps its socket and stops receiving guest connections.
+
+    the connection still succeeds, which is exactly why this has to be reported.
+    "nc -z <gateway> 1337" cannot tell the host listener from the container that
+    took the port over, so an endpoint the operator believes is a host service is
+    quietly a container, and the check that was meant to exercise the INPUT
+    allowlist exercises the FORWARD one twice instead.
+
+    returns (host_port, destination, range) triples.
+    """
+    conflicts = []
+    for host_port, target in published:
+        for rng in ranges:
+            start, end = range_bounds(rng)
+            if start <= host_port <= end:
+                conflicts.append((host_port, target, rng))
+                break
+    return conflicts
+
+
+def find_endpoint_conflicts(ranges):
+    """endpoint_conflicts() against the live nat/DOCKER chain."""
+    try:
+        out = subprocess.check_output(
+            _privileged_prefix() + [IPTABLES, "-t", "nat", "-S", "DOCKER"],
+            text=True, stderr=subprocess.DEVNULL)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return []
+    return endpoint_conflicts(ranges, parse_published_ports(out.splitlines()))
+
+
 # ------------------------------------------------------------------- config io
 
 def _valid_port(value):

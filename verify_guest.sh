@@ -43,6 +43,13 @@ guest() { sshpass -p anything ssh $SSH_OPTS -p 2222 guestuser@127.0.0.1 "$1" 2>&
 guests_up() { docker ps -q --filter ancestor="$IMG" | grep -c . ; }
 
 hdr "host listener on an allowed endpoint (1337)"
+# the token identifies *this* listener. "nc -z" only proves that something answered
+# on the port, and if a container publishes host port 1337 docker's DNAT rule in
+# nat/PREROUTING takes the port over - the guest is forwarded to the container
+# before INPUT, the probe still succeeds, and ATTACK_PG_INPUT is never exercised.
+# fetching the token is what tells the host listener apart from a container.
+ENDPOINT_TOKEN=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')
+printf '%s' "$ENDPOINT_TOKEN" > "$WORK/endpoint-token"
 nohup python3 -m http.server 1337 --bind "$GW" --directory "$WORK" > "$WORK/listener.log" 2>&1 &
 LISTENER=$!
 sleep 2
@@ -129,6 +136,7 @@ if [ "$GUEST_UP" -ne 1 ]; then
 else
     PROBES=$(guest "
         nc -w 5 -z $GW 1337 > /dev/null 2>&1; echo ALLOWED=\$?
+        echo TOKEN=\$(curl -s -m 8 http://$GW:1337/endpoint-token 2>/dev/null)
         nc -w 5 -z $GW 1338 > /dev/null 2>&1; echo PUBLISHED=\$?
         nc -w 5 -z $GW 22   > /dev/null 2>&1; echo SSH22=\$?
         nc -w 5 -z $GW 2222 > /dev/null 2>&1; echo CSSH=\$?
@@ -155,6 +163,16 @@ else
         else bad "$1 NOT reachable (rc=$v) - allowlist too strict"; fi
     }
     check_allowed "allowed endpoint 1337" ALLOWED
+    # and prove it was the host listener that answered, not a container that
+    # published the same host port - see the token comment above
+    GOT_TOKEN=$(rc TOKEN)
+    if [ -z "$GOT_TOKEN" ]; then
+        bad "allowed endpoint 1337 answered but served no token - port 1337 is not the host listener (published by a container?)"
+    elif [ "$GOT_TOKEN" = "$ENDPOINT_TOKEN" ]; then
+        ok "allowed endpoint 1337 is the host listener (INPUT path exercised)"
+    else
+        bad "allowed endpoint 1337 served a different token - the host listener is shadowed by something else on that port"
+    fi
     if [ -n "$ENDPOINT_CTR" ]; then
         check_allowed "published endpoint 1338 (via FORWARD)" PUBLISHED
     else

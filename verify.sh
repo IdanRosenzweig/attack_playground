@@ -74,6 +74,56 @@ sudo iptables -S DOCKER-USER | grep -q "ATTACK_PG_FWD" && ok "DOCKER-USER -> ATT
 sudo iptables -n -L DOCKER-USER | head -1 | grep -q "0 references" \
     && bad "DOCKER-USER has 0 references (chain is dead)" || ok "DOCKER-USER is referenced"
 
+hdr "endpoint shadowing"
+# an allowed endpoint is supposed to be a service on the host, reached through
+# ATTACK_PG_INPUT. if a container publishes a host port inside one of the ranges,
+# docker's DNAT rule in nat/PREROUTING takes that port over: the guest's packet is
+# rewritten to the container before the routing decision, travels FORWARD, and the
+# INPUT allowlist never sees it. the connection still succeeds, so a "nc -z" probe
+# cannot tell the two apart - this check reads the nat table instead.
+SHADOW=$(python3 - <<'PY' 2>/dev/null
+import os, sys
+sys.path.insert(0, os.path.join(os.getcwd(), "scripts"))
+import network_common_linux as nc
+config = nc.find_config()
+ranges = nc.parse_config(config) if config else []
+for host_port, target, rng in nc.find_endpoint_conflicts(ranges):
+    print(host_port, target, rng)
+PY
+)
+if [ -z "$SHADOW" ]; then
+    ok "no configured endpoint is shadowed by a published container port"
+else
+    while read -r port target rng; do
+        [ -z "$port" ] && continue
+        bad "tcp $port (endpoint range $rng) is published by $target - dialling the gateway there reaches the container, not the host, and skips ATTACK_PG_INPUT"
+    done <<< "$SHADOW"
+fi
+
+# docker hands out dynamic host ports ("-p 80" with no host side) from the kernel's
+# ip_local_port_range, so a range that overlaps it can be taken over by a container
+# nobody published deliberately.
+EPHEMERAL=$(sysctl -n net.ipv4.ip_local_port_range 2>/dev/null)
+if [ -n "$EPHEMERAL" ]; then
+    OVERLAP=$(python3 - "$EPHEMERAL" <<'PY' 2>/dev/null
+import os, sys
+sys.path.insert(0, os.path.join(os.getcwd(), "scripts"))
+import network_common_linux as nc
+lo, hi = (int(x) for x in sys.argv[1].split())
+config = nc.find_config()
+for rng in (nc.parse_config(config) if config else []):
+    start, end = nc.range_bounds(rng)
+    if start <= hi and lo <= end:
+        print(rng)
+PY
+)
+    if [ -z "$OVERLAP" ]; then
+        ok "no endpoint range overlaps docker's dynamic publish range ($EPHEMERAL)"
+    else
+        bad "endpoint range(s) $(echo $OVERLAP | tr '\n' ' ')overlap docker's dynamic publish range ($EPHEMERAL) - an unrelated container can be assigned one of these host ports and become guest-reachable"
+    fi
+fi
+
 hdr "ipv6 mirror"
 if sudo ip6tables -n -L ATTACK_PG_INPUT > /dev/null 2>&1; then
     sudo ip6tables -S ATTACK_PG_INPUT | tail -1 | grep -q -- "-j DROP" \

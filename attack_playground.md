@@ -213,6 +213,50 @@ accepting ssh connections - and spawning guests on this network - the moment it 
 so applying them afterwards leaves a window in which a guest is live and unrestricted. if
 setup fails, `start.sh` refuses to launch the services at all.
 
+### a published port shadows the host endpoint behind it
+
+the DNAT above is keyed on the **port**, not on who is supposed to own it. docker's rule
+in `nat/DOCKER` is `! -i <its own bridge> -p tcp --dport <port> -j DNAT`, and `PREROUTING`
+runs before the routing decision - so if any container publishes a host port that falls
+inside one of the configured endpoint ranges, a guest dialling `<gateway>:<that port>` is
+rewritten to the container and forwarded. it never reaches `INPUT`, and `ATTACK_PG_INPUT`
+never sees it. a host process listening on the same port of the gateway keeps its socket
+and silently stops receiving guest connections.
+
+the policy is not widened by this - the `ATTACK_PG_FWD` accept is still keyed on the
+original destination being an allowed port on the gateway - but two things break quietly:
+
+  * the endpoint is not what the operator thinks it is. the guest reaches a container,
+    not the host service.
+  * the check meant to exercise `ATTACK_PG_INPUT` exercises `ATTACK_PG_FWD` instead, so
+    the INPUT allowlist goes untested and a regression there would not be caught.
+
+it is invisible from the guest, because a connect-and-close probe cannot tell the two
+apart. in a capture the give-away is that the packet leaves with a **rewritten
+destination** and a decremented ttl:
+
+```
+172.24.0.2:34400 > 172.24.0.1:1337   [S] ttl 64     # what the guest dialled
+172.24.0.2:34400 > 172.18.0.15:1337  [S] ttl 63     # what actually went on the wire
+```
+
+so it is checked on the host instead, against the `nat` table rather than by probing:
+`setup_networking_linux.py` warns about it at startup, and `verify.sh` fails on it. it is
+a warning at setup and not a refusal to start, because publishing an endpoint as a
+container is a supported way to run one - doing it by accident on a port the host is also
+serving is not.
+
+`verify_guest.sh` additionally makes the 1337 probe prove *which* listener answered: the
+host listener serves a random token, the guest fetches it, and a missing or different
+token fails the check even though the connection succeeded.
+
+for the same reason an endpoint range should not overlap the kernel's
+`net.ipv4.ip_local_port_range` (commonly `32768-60999`), which is where docker draws
+**dynamic** host ports from when a container publishes a port without naming the host
+side (`-p 80`). a range that overlaps it can be taken over by a container nobody
+published deliberately. the shipped `40000-40100` range does overlap it, and `verify.sh`
+reports that.
+
 ### fail-closed chains
 
 each chain is rebuilt **deny-first**: it is flushed, given its terminal `DROP`, and only
@@ -300,6 +344,8 @@ then ssh in and confirm the guest is actually restricted:
 ```
 docker inspect -f '{{json .NetworkSettings.Networks}}' <guest-container>   # attack_playground_net only
 nc -vz <gateway-ip> 1337        # allowed endpoint, must succeed
+curl -s <gateway-ip>:1337/     # ... and must be the *host* listener, not a
+                               # container that published the same host port
 nc -vz <gateway-ip> 22          # must fail
 nc -6 -vz <host-link-local>%eth0 22   # must fail
 curl -m 5 https://example.com   # must fail
