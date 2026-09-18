@@ -44,5 +44,9 @@ fi
 #     rm -f host.key
 # fi
 
+# the stats service's session history (stats_data/) is kept on purpose: "ever
+# connected" is only meaningful if it survives a cleanup. "sudo rm -rf stats_data"
+# starts the count over.
+
 # print complete
 echo "cleanup complete"

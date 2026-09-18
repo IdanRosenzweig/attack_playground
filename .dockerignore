@@ -6,3 +6,5 @@ host.key.pub
 .git
 __pycache__
 *.pyc
+# the stats service's session history: state, not part of the guest image
+stats_data

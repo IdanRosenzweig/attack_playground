@@ -116,3 +116,4 @@ if [ -z "$HOST_IP" ]; then
     HOST_IP="localhost"
 fi
 echo "connect with ssh, target: $HOST_IP, port: 2222, user: anyuser, password: <anything> (e.g. ssh -p 2222 anyuser@$HOST_IP)"
+echo "connection statistics: curl http://127.0.0.1:2224/stats (loopback only, see stats_server.py)"

@@ -11,4 +11,8 @@ host.key.pub
 # network on this host, which is not the same anywhere else
 config.runtime.yaml
 
+# written by the stats service (playground-stats in docker-compose.yaml): every
+# session ever opened on this host. history, not source
+stats_data/
+
 .DS_Store

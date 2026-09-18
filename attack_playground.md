@@ -22,6 +22,10 @@ limits a guest runs under. it carries a placeholder for the docker network's gat
 `systemd/attack-playground.service`: brings the playground up at boot *through*
 `start.sh` - see *surviving a reboot* below
 
+`stats_server.py`: how many users are connected now, were in the last hour, and
+ever - the `playground-stats` service in `docker-compose.yaml`, see *connection
+statistics* below
+
 ## host requirements
 
 the playground runs **on linux x86-64 only**. the guest
@@ -161,6 +165,76 @@ concurrent connections over all sources (`MAX_SSH_CONNECTIONS` in
 `network_common_linux.py`). a kernel without `xt_connlimit` gets a warning rather than
 a refusal to start: this is a limit, not a restriction. what is *not* capped is how
 long a session may stay open; if that matters, reap old guest containers from a timer.
+
+## connection statistics
+
+`stats_server.py` answers, as json on `http://127.0.0.1:2224/stats`, how many users
+are connected right now, how many were connected at some point during the last
+hour, and how many have ever connected:
+
+```
+$ curl -s http://127.0.0.1:2224/stats
+{"currently_connected": 2, "connected_in_window": 5, "window_seconds": 3600,
+ "ever_connected": 123, "generated_at": "2026-09-18T14:03:21Z",
+ "collector": {"connected": true, "reconciled_at": "2026-09-18T09:12:40Z",
+               "last_event_at": "2026-09-18T14:01:07Z"}}
+```
+
+`?window=` picks another window - seconds (`?window=900`) or a count with a unit
+(`15m`, `2h`, `7d`) - and `STATS_WINDOW` in `docker-compose.yaml` sets the one used
+when a request names none. a window that does not parse, or is zero, is a 400.
+`start.sh` prints the url once the playground is up.
+
+### what is counted
+
+a **user is one ssh session**. the auth webhook says yes to anybody under any
+name, so a username identifies nobody, and a client address may be one person or a
+whole nat - sessions are the only thing the playground can count honestly.
+containerssh turns every ssh connection into exactly one guest container, so the
+server follows docker's event stream: a guest container starting is a user
+connecting, and that container dying is the user leaving. the username and client
+address containerssh puts on each guest as labels (`containerssh_username`,
+`containerssh_ip`) are stored with the session, for anyone who wants to slice the
+numbers differently later. containers from any other image - containerssh itself,
+the webhook, a published endpoint - are not users.
+
+*connected in the window* counts every session that was open at any moment of it:
+the ones still open, and the ones that ended inside it. the three numbers therefore
+nest: `currently_connected <= connected_in_window <= ever_connected`.
+
+### where the numbers live
+
+sessions are rows in `stats_data/stats.db`, a sqlite file bind-mounted into the
+service, so *ever connected* survives restarts of the server and of the playground.
+`cleanup.sh` leaves it alone; `rm -rf stats_data` starts the count over. the file is
+root-owned - the service runs as root, like containerssh - and
+`sudo sqlite3 stats_data/stats.db 'select * from sessions'` lists every session with
+its start, end, username and client address.
+
+on startup, and again whenever the docker event stream has to be reopened, the
+store is reconciled against the guests actually running: guests that appeared while
+the server was down are added, and sessions still open whose guest is gone are
+closed at that moment and marked `reconcile`, because their real end was not seen.
+a session that both started and ended while the server was down is not recorded.
+`stop.sh` therefore stops containerssh alone before sweeping the guests, and keeps
+the other services - this one included - up until `compose down`, so a normal stop
+records every session's end exactly.
+
+`collector.connected` in the response says whether the event stream is being
+followed right now. `false` means docker is unreachable: the numbers are as of
+`reconciled_at` and `last_event_at`, the server keeps serving what it knows, and it
+retries every few seconds.
+
+### what it can reach
+
+the service has the docker socket, which is root on the host. it only ever sends
+`GET` requests over it (list the running guests, follow events), and it is stdlib
+only, so nothing is installed at start and it needs no network access to come up.
+the socket is mounted `:ro` to say so, but that makes the socket *file* unwritable,
+not the api behind it. the port is published on loopback only, like the auth
+webhook - from another machine, tunnel it (`ssh -L 2224:127.0.0.1:2224 <host>`).
+the service sits on `containerssh_net`, which no guest can reach, and the stats
+port is not in the endpoint allowlist either.
 
 ## network restrictions
 
@@ -370,13 +444,16 @@ also clears the flat `DOCKER-USER` rules written by earlier versions.
 `start.sh`, every chain and its terminal `DROP`, the hooks, the forward allow for
 published endpoints, the ssh cap, the ipv6 mirror, both sysctls, the loopback binding,
 the restart policy, the rendered guest hosts entry (and that the host itself does not
-resolve `researchlabs.tech` to the gateway) and that nothing was persisted to
-`/etc/iptables`. `./verify_guest.sh`
+resolve `researchlabs.tech` to the gateway), that nothing was persisted to
+`/etc/iptables`, and that the stats server answers on loopback, is following docker
+and has written its sqlite file. `./verify_guest.sh`
 then proves the policy from inside real guest containers: the host and published
 endpoints are reachable, everything else (other host ports, the internet, the lan, dns,
 icmp, the other guest over ipv4 and ipv6 link-local) is not, `researchlabs.tech` resolves
 to the gateway and reaches the same host listener while still being dropped on a port
-outside the allowlist, and the guest hardening took effect. its test listener is bound to the gateway ip and serves an empty
+outside the allowlist, the guest hardening took effect, and the stats server counts
+exactly the guests it opened - the two it holds open as connected now, and the one
+that already ended in the window. its test listener is bound to the gateway ip and serves an empty
 directory - the repo contains the ssh host private key, so it must never be what gets
 served. both need `sshpass` and `netcat-openbsd` on the host, and a playground that is
 not already running. a probe that could not run is reported as "not tested" rather
@@ -417,9 +494,10 @@ note that icmp to the gateway is dropped as well, so `ping <gateway-ip>` failing
 
 ### tests
 
-the config parsing, the fail-closed chain construction, the forward allow for published
-endpoints, the ssh cap, the containerssh config rendering and the webhook contract have
-unit tests. they are stdlib only
+the config parsing, the fail-closed chain construction, the forward allow for
+published endpoints, the ssh cap, the containerssh config rendering, the webhook
+contract and the stats server (against a fake docker engine api served on a unix
+socket) have unit tests. they are stdlib only
 and need neither root nor docker:
 
 ```

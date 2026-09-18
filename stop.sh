@@ -11,13 +11,18 @@ source "$SCRIPT_DIR/scripts/common.sh"
 # print stopping
 echo "stopping playground..."
 
-# stop containerssh first. it spawns a guest for every ssh login, so as long as
-# it is up a guest can appear between "list the guests" and "remove them" and be
-# left behind attached to the playground network - which then cannot be removed.
-# stopping containerssh does not remove the guests it already started, hence the
-# sweep below.
-echo "stopping services..."
-compose stop
+# stop containerssh first, and only containerssh. it spawns a guest for every ssh
+# login, so as long as it is up a guest can appear between "list the guests" and
+# "remove them" and be left behind attached to the playground network - which
+# then cannot be removed. stopping containerssh does not remove the guests it
+# already started, hence the sweep below.
+#
+# the other services stay up until "compose down" further down. the stats
+# collector is one of them, and it records each guest going away as the end of
+# that user's session; stopped earlier, it would only find them gone on the next
+# start and have to guess when they left.
+echo "stopping containerssh..."
+compose stop containerssh
 
 # remove all guest containers, running or not.
 # "docker ps -q" only lists running ones, which left every exited guest behind: they
