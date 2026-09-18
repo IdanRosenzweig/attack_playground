@@ -207,7 +207,8 @@ def get_subnet(network_name):
 
 
 def port_arg(port_range):
-    """turn '1337-1355' into iptables' '1337:1355'. a bare port is passed through."""
+    """turn a range like '9100-9109' into iptables' '9100:9109'. a bare port is passed
+    through. the numbers here are examples - the real ones come from the config file."""
     if '-' in port_range:
         start, end = port_range.split('-', 1)
         return f"{start}:{end}"
@@ -431,7 +432,8 @@ def remove_legacy_rules(bridge_if, gateway_ip, ranges):
 # ------------------------------------------------- published endpoint shadowing
 
 def range_bounds(port_range):
-    """turn '1337-1355' (or a bare '1337') into an inclusive (start, end) pair."""
+    """turn a range like '9100-9109' (or a bare '9100') into an inclusive (start, end)
+    pair. examples, not config values - the ranges come from the config file."""
     if '-' in port_range:
         start, end = port_range.split('-', 1)
         return int(start), int(end)
@@ -450,10 +452,10 @@ def parse_published_ports(rules):
 
     docker writes one rule per published port into nat/DOCKER:
 
-      -A DOCKER ! -i br-x -p tcp -m tcp --dport 1337 -j DNAT --to-destination 172.18.0.15:1337
+      -A DOCKER ! -i br-x -p tcp -m tcp --dport 9100 -j DNAT --to-destination 172.18.0.15:9100
 
-    a publish bound to loopback ("-d 127.0.0.1/32", i.e. "127.0.0.1:2223:8080") can
-    never be hit from the bridge, so it is not a conflict and is skipped here.
+    a publish bound to loopback ("-d 127.0.0.1/32", i.e. "127.0.0.1:<host>:<container>")
+    can never be hit from the bridge, so it is not a conflict and is skipped here.
     """
     published = []
     for line in rules:
@@ -481,7 +483,7 @@ def endpoint_conflicts(ranges, published):
     shadowed: it keeps its socket and stops receiving guest connections.
 
     the connection still succeeds, which is exactly why this has to be reported.
-    "nc -z <gateway> 1337" cannot tell the host listener from the container that
+    "nc -z <gateway> <port>" cannot tell the host listener from the container that
     took the port over, so an endpoint the operator believes is a host service is
     quietly a container, and the check that was meant to exercise the INPUT
     allowlist exercises the FORWARD one twice instead.
@@ -543,9 +545,9 @@ def parse_config(config_path):
     """
     read port ranges from config file, ignoring comments and blank lines.
 
-    ports are range-checked here rather than left to iptables. "70000" or "1337-99999"
-    matches the digit patterns below but is rejected by iptables with "invalid
-    port/service", which used to abort the rebuild half way through the chain.
+    ports are range-checked here rather than left to iptables. an entry like "70000" or
+    "1000-99999" matches the digit patterns below but is rejected by iptables with
+    "invalid port/service", which used to abort the rebuild half way through the chain.
     """
     if not os.path.exists(config_path):
         return []

@@ -18,9 +18,10 @@ services:
       # different port. the container side is where containerssh listens.
       - "${SSH_PORT:?set SSH_PORT in .env}:2222"
     volumes:
-      # config.runtime.yaml, not config.yaml: the guests' /etc/hosts entry for
-      # researchlabs.tech points at the gateway of attack_playground_net, and docker
-      # only numbers that network when it creates it. start.sh renders the tracked
+      # config.runtime.yaml, not config.yaml: the guests' /etc/hosts entry - the
+      # extrahosts line in config.yaml - points at the gateway of
+      # attack_playground_net, and docker only numbers that network when it creates
+      # it. start.sh renders the tracked
       # config.yaml into this file once the network exists - see
       # scripts/render_config.py. bring the playground up with ./start.sh, not with
       # "docker compose up": without the rendered file docker mounts an empty
@@ -115,7 +116,7 @@ services:
     ports:
       # loopback only, like the auth webhook: nothing needs this from the lan, and
       # a published port is DNATed before the host firewall sees it. the port is
-      # STATS_PORT from .env (2224 as shipped); read it with
+      # STATS_PORT from .env; read it with
       #   curl http://127.0.0.1:$STATS_PORT/stats
       # or tunnel it from elsewhere: ssh -L $STATS_PORT:127.0.0.1:$STATS_PORT <host>
       - "127.0.0.1:${STATS_PORT:?set STATS_PORT in .env}:8081"

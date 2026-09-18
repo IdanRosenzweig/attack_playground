@@ -2,6 +2,10 @@
 """
 regression tests for the pure logic in network_common_linux.py.
 
+the port numbers below are made up fixtures, deliberately not the ones
+attack_network_endpoints.conf ships: these tests feed their own config, and a
+copy of the real values here would only be a second place to keep in step.
+
 stdlib only, and no iptables/docker/root needed - every call into iptables is
 recorded instead of run. run with:
 
@@ -36,10 +40,10 @@ class ParseConfigTest(unittest.TestCase):
             os.unlink(path)
 
     def test_keeps_single_ports_and_ranges(self):
-        self.assertEqual(self.parse("1337\n2337-2340\n"), ["1337", "2337-2340"])
+        self.assertEqual(self.parse("9100\n9200-9203\n"), ["9100", "9200-9203"])
 
     def test_ignores_comments_and_blank_lines(self):
-        self.assertEqual(self.parse("# endpoints\n\n  1337  \n"), ["1337"])
+        self.assertEqual(self.parse("# endpoints\n\n  9100  \n"), ["9100"])
 
     def test_rejects_reversed_range(self):
         self.assertEqual(self.parse("2000-1000\n"), [])
@@ -47,13 +51,13 @@ class ParseConfigTest(unittest.TestCase):
     def test_rejects_ports_above_65535(self):
         # these match the digit patterns but iptables rejects them, which used to
         # abort the chain rebuild part way through and leave it without its DROP
-        self.assertEqual(self.parse("70000\n1337-99999\n"), [])
+        self.assertEqual(self.parse("70000\n9100-99999\n"), [])
 
     def test_rejects_port_zero(self):
         self.assertEqual(self.parse("0\n0-100\n"), [])
 
     def test_rejects_garbage(self):
-        self.assertEqual(self.parse("http\n1337/tcp\n-1\n"), [])
+        self.assertEqual(self.parse("http\n9100/tcp\n-1\n"), [])
 
     def test_missing_file_is_empty(self):
         self.assertEqual(nc.parse_config("/nonexistent/endpoints.conf"), [])
@@ -61,10 +65,10 @@ class ParseConfigTest(unittest.TestCase):
 
 class PortArgTest(unittest.TestCase):
     def test_range_uses_iptables_colon_syntax(self):
-        self.assertEqual(nc.port_arg("1337-1355"), "1337:1355")
+        self.assertEqual(nc.port_arg("9100-9109"), "9100:9109")
 
     def test_single_port_passes_through(self):
-        self.assertEqual(nc.port_arg("1337"), "1337")
+        self.assertEqual(nc.port_arg("9100"), "9100")
 
 
 class FailClosedTest(unittest.TestCase):
@@ -85,7 +89,7 @@ class FailClosedTest(unittest.TestCase):
 
     def test_drop_is_installed_before_any_allow_rule(self):
         nc.ensure_chain_closed(nc.INPUT_CHAIN)
-        setup.build_input_chain("172.31.0.1", ["1337-1355", "2337-2340"])
+        setup.build_input_chain("172.31.0.1", ["9100-9109", "9200-9203"])
 
         drop_at = next(i for i, c in enumerate(self.calls)
                        if c[:1] == ["-A"] and c[-2:] == ["-j", "DROP"])
@@ -97,7 +101,7 @@ class FailClosedTest(unittest.TestCase):
 
     def test_allow_rules_are_inserted_above_the_drop(self):
         nc.ensure_chain_closed(nc.INPUT_CHAIN)
-        setup.build_input_chain("172.31.0.1", ["1337-1355"])
+        setup.build_input_chain("172.31.0.1", ["9100-9109"])
 
         for call in self.calls:
             if call[-2:] == ["-j", "ACCEPT"]:
@@ -106,7 +110,7 @@ class FailClosedTest(unittest.TestCase):
 
     def test_allow_rules_keep_config_order(self):
         nc.ensure_chain_closed(nc.INPUT_CHAIN)
-        setup.build_input_chain("172.31.0.1", ["1337-1355", "2337-2340", "3337-3345"])
+        setup.build_input_chain("172.31.0.1", ["9100-9109", "9200-9203", "9300-9308"])
 
         positions = [int(c[2]) for c in self.calls
                      if c[0] == "-I" and c[-2:] == ["-j", "ACCEPT"]]
@@ -115,7 +119,7 @@ class FailClosedTest(unittest.TestCase):
     def test_forward_chains_are_built_deny_first_too(self):
         for chain in (nc.FORWARD_CHAIN, nc.FORWARD_IN_CHAIN):
             nc.ensure_chain_closed(chain)
-        setup.build_forward_chains("172.31.0.1", ["1337-1355"])
+        setup.build_forward_chains("172.31.0.1", ["9100-9109"])
 
         drops = [i for i, c in enumerate(self.calls)
                  if c[:1] == ["-A"] and c[-2:] == ["-j", "DROP"]]
@@ -144,25 +148,25 @@ class PublishedEndpointTest(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     def test_forward_allow_matches_original_destination(self):
-        setup.build_forward_chains("172.31.0.1", ["1337-1355", "2337"])
+        setup.build_forward_chains("172.31.0.1", ["9100-9109", "9200"])
         allows = [c for c in self.calls if c[1] == nc.FORWARD_CHAIN and c[-1] == "ACCEPT"]
         self.assertEqual(len(allows), 2)
         for call in allows:
             self.assertIn("DNAT", call)
             self.assertEqual(call[call.index("--ctorigdst") + 1], "172.31.0.1")
-        self.assertEqual(allows[0][allows[0].index("--ctorigdstport") + 1], "1337:1355")
-        self.assertEqual(allows[1][allows[1].index("--ctorigdstport") + 1], "2337")
+        self.assertEqual(allows[0][allows[0].index("--ctorigdstport") + 1], "9100:9109")
+        self.assertEqual(allows[1][allows[1].index("--ctorigdstport") + 1], "9200")
 
     def test_forward_allow_never_matches_by_final_destination(self):
         # "-d <gateway>" in FORWARD can never fire (the packet is already DNATed)
         # and would be a silent no-op that looks like an allow rule
-        setup.build_forward_chains("172.31.0.1", ["1337-1355"])
+        setup.build_forward_chains("172.31.0.1", ["9100-9109"])
         for call in self.calls:
             if call[1] == nc.FORWARD_CHAIN:
                 self.assertNotIn("-d", call)
 
     def test_replies_are_let_back_in_but_nothing_else(self):
-        setup.build_forward_chains("172.31.0.1", ["1337-1355"])
+        setup.build_forward_chains("172.31.0.1", ["9100-9109"])
         rules_in = [c for c in self.calls if c[1] == nc.FORWARD_IN_CHAIN]
         self.assertEqual(len(rules_in), 1)
         self.assertIn("ESTABLISHED,RELATED", rules_in[0])
@@ -242,7 +246,7 @@ class SshPortTest(unittest.TestCase):
         self.assertIn("start.sh", str(caught.exception))
 
     def test_garbage_is_an_error(self):
-        for bad in ("", "ssh", "0", "70000", "22 22", "2222/tcp"):
+        for bad in ("", "ssh", "0", "70000", "22 22", "9000/tcp"):
             with self.assertRaises(ValueError, msg=repr(bad)):
                 nc.ssh_port_from_env({"SSH_PORT": bad})
 
@@ -315,54 +319,54 @@ class EndpointShadowingTest(unittest.TestCase):
     RULES = [
         "-N DOCKER",
         "-A DOCKER -i br-playground -j RETURN",
-        "-A DOCKER ! -i br-playground -p tcp -m tcp --dport 2222 "
-        "-j DNAT --to-destination 172.18.0.4:2222",
-        "-A DOCKER ! -i br-playground -p tcp -m tcp --dport 1337 "
-        "-j DNAT --to-destination 172.18.0.15:1337",
-        "-A DOCKER -d 127.0.0.1/32 ! -i br-playground -p tcp -m tcp --dport 2223 "
+        "-A DOCKER ! -i br-playground -p tcp -m tcp --dport 9000 "
+        "-j DNAT --to-destination 172.18.0.4:9000",
+        "-A DOCKER ! -i br-playground -p tcp -m tcp --dport 9100 "
+        "-j DNAT --to-destination 172.18.0.15:9100",
+        "-A DOCKER -d 127.0.0.1/32 ! -i br-playground -p tcp -m tcp --dport 9001 "
         "-j DNAT --to-destination 172.18.0.3:8080",
     ]
 
     def test_range_bounds(self):
-        self.assertEqual(nc.range_bounds("1337-1355"), (1337, 1355))
-        self.assertEqual(nc.range_bounds("1337"), (1337, 1337))
+        self.assertEqual(nc.range_bounds("9100-9109"), (9100, 9109))
+        self.assertEqual(nc.range_bounds("9100"), (9100, 9100))
 
     def test_parses_published_ports(self):
         self.assertEqual(
             nc.parse_published_ports(self.RULES),
-            [(2222, "172.18.0.4:2222"), (1337, "172.18.0.15:1337")])
+            [(9000, "172.18.0.4:9000"), (9100, "172.18.0.15:9100")])
 
     def test_loopback_publish_is_not_a_conflict(self):
-        # "127.0.0.1:2223:8080" can never be reached from the bridge
+        # "127.0.0.1:9001:8080" can never be reached from the bridge
         ports = [p for p, _ in nc.parse_published_ports(self.RULES)]
-        self.assertNotIn(2223, ports)
+        self.assertNotIn(9001, ports)
 
     def test_reports_a_port_inside_an_endpoint_range(self):
         published = nc.parse_published_ports(self.RULES)
         self.assertEqual(
-            nc.endpoint_conflicts(["1337-1355"], published),
-            [(1337, "172.18.0.15:1337", "1337-1355")])
+            nc.endpoint_conflicts(["9100-9109"], published),
+            [(9100, "172.18.0.15:9100", "9100-9109")])
 
     def test_ignores_published_ports_outside_every_range(self):
         published = nc.parse_published_ports(self.RULES)
-        self.assertEqual(nc.endpoint_conflicts(["2337-2340"], published), [])
+        self.assertEqual(nc.endpoint_conflicts(["9200-9203"], published), [])
 
     def test_matches_a_bare_single_port_range(self):
         self.assertEqual(
-            nc.endpoint_conflicts(["1337"], [(1337, "172.18.0.15:1337")]),
-            [(1337, "172.18.0.15:1337", "1337")])
+            nc.endpoint_conflicts(["9100"], [(9100, "172.18.0.15:9100")]),
+            [(9100, "172.18.0.15:9100", "9100")])
 
     def test_range_boundaries_are_inclusive(self):
-        published = [(1337, "a:1"), (1355, "b:1"), (1356, "c:1")]
-        found = [p for p, _, _ in nc.endpoint_conflicts(["1337-1355"], published)]
-        self.assertEqual(found, [1337, 1355])
+        published = [(9100, "a:1"), (9109, "b:1"), (9110, "c:1")]
+        found = [p for p, _, _ in nc.endpoint_conflicts(["9100-9109"], published)]
+        self.assertEqual(found, [9100, 9109])
 
     def test_no_nat_chain_is_not_a_conflict(self):
         # a host where the DOCKER chain does not exist must not look "clean by error"
         # in a way that raises - it reports nothing and the caller carries on
         with mock.patch.object(nc.subprocess, "check_output",
                                side_effect=FileNotFoundError):
-            self.assertEqual(nc.find_endpoint_conflicts(["1337-1355"]), [])
+            self.assertEqual(nc.find_endpoint_conflicts(["9100-9109"]), [])
 
 
 if __name__ == "__main__":

@@ -3,6 +3,10 @@
 regression tests for endpoints.py, which hands the shell scripts what
 attack_network_endpoints.conf allows so they never repeat a port from it.
 
+the port numbers below are made up fixtures, deliberately not the ones
+attack_network_endpoints.conf ships: these tests feed their own config, and a
+copy of the real values here would only be a second place to keep in step.
+
 stdlib only, no docker and no root. run with:
 
     python3 -m unittest discover -s scripts -p 'test_*.py'
@@ -31,13 +35,13 @@ def write_config(text):
 
 class AllowedPortsTest(unittest.TestCase):
     def test_walks_the_ranges_in_config_order(self):
-        self.assertEqual(endpoints.allowed_ports(["1337-1339", "2337"], 5), [1337, 1338, 1339, 2337])
+        self.assertEqual(endpoints.allowed_ports(["9100-9102", "9200"], 5), [9100, 9101, 9102, 9200])
 
     def test_stops_at_the_count(self):
-        self.assertEqual(endpoints.allowed_ports(["1337-1365", "2337-2345"], 2), [1337, 1338])
+        self.assertEqual(endpoints.allowed_ports(["9100-9119", "9200-9208"], 2), [9100, 9101])
 
     def test_bare_ports_count_as_ranges_of_one(self):
-        self.assertEqual(endpoints.allowed_ports(["1337", "2337-2338"], 3), [1337, 2337, 2338])
+        self.assertEqual(endpoints.allowed_ports(["9100", "9200-9201"], 3), [9100, 9200, 9201])
 
     def test_nothing_from_nothing(self):
         self.assertEqual(endpoints.allowed_ports([], 2), [])
@@ -56,14 +60,14 @@ class MainTest(unittest.TestCase):
         return code, out.getvalue(), err.getvalue()
 
     def test_ranges_come_out_in_iptables_syntax(self):
-        code, out, _ = self.run_main(["ranges"], "1337-1365\n# a comment\n2337\n")
+        code, out, _ = self.run_main(["ranges"], "9100-9119\n# a comment\n9200\n")
         self.assertEqual(code, 0)
-        self.assertEqual(out, "1337:1365\n2337\n")
+        self.assertEqual(out, "9100:9119\n9200\n")
 
     def test_ports_are_the_first_allowed(self):
-        code, out, _ = self.run_main(["ports", "2"], "1337-1365\n")
+        code, out, _ = self.run_main(["ports", "2"], "9100-9119\n")
         self.assertEqual(code, 0)
-        self.assertEqual(out, "1337 1338\n")
+        self.assertEqual(out, "9100 9101\n")
 
     def test_missing_config_is_an_error_not_an_empty_answer(self):
         code, out, err = self.run_main(["ranges"], None)
@@ -80,21 +84,21 @@ class MainTest(unittest.TestCase):
 
     def test_parser_warnings_stay_out_of_the_answer(self):
         # the shell scripts capture stdout: a warning there would be read as a range
-        code, out, err = self.run_main(["ranges"], "http\n1337-1365\n")
+        code, out, err = self.run_main(["ranges"], "http\n9100-9119\n")
         self.assertEqual(code, 0)
-        self.assertEqual(out, "1337:1365\n")
+        self.assertEqual(out, "9100:9119\n")
         self.assertIn("warning", err)
 
     def test_too_few_ports_is_an_error(self):
         # verify_guest.sh needs two: a host listener and a published container
-        code, out, err = self.run_main(["ports", "2"], "1337\n")
+        code, out, err = self.run_main(["ports", "2"], "9100\n")
         self.assertEqual(code, 1)
         self.assertEqual(out, "")
         self.assertIn("only 1 port", err)
 
     def test_usage(self):
         for args in ([], ["ranges", "extra"], ["ports"], ["ports", "x"], ["ports", "0"], ["nope"]):
-            code, out, err = self.run_main(args, "1337\n")
+            code, out, err = self.run_main(args, "9100\n")
             self.assertEqual(code, 2, args)
             self.assertEqual(out, "")
             self.assertIn("usage", err)

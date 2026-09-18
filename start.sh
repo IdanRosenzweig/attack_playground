@@ -79,10 +79,11 @@ fi
 
 # render the containerssh config for this run.
 #
-# guests resolve "researchlabs.tech" to the gateway of the network created above
-# through an /etc/hosts entry containerssh asks docker for, and docker only numbers
-# that network when it creates it - so the address cannot live in the tracked
-# config.yaml. this fills it in; compose mounts the rendered copy.
+# guests resolve the playground's gateway name - config.yaml's extrahosts entry, which
+# is where that name is defined - to the gateway of the network created above, through
+# an /etc/hosts entry containerssh asks docker for. docker only numbers that network
+# when it creates it, so the address cannot live in the tracked config.yaml. this fills
+# it in and prints the name; compose mounts the rendered copy.
 #
 # it runs after the network exists and before the services come up: containerssh
 # reads its config once, at startup.

@@ -23,6 +23,14 @@ trap 'rm -rf "$WORK"' EXIT
 GUEST_IMAGE="attack_playground_image:latest"
 NET="attack_playground_net"
 
+# the guests' name for the gateway, read out of config.yaml's extrahosts entry -
+# the one place it is defined - rather than spelled out again here
+GUEST_HOST=$(python3 scripts/render_config.py hostname 2>/dev/null)
+if [ -z "$GUEST_HOST" ]; then
+    echo "error: config.yaml has no gateway hosts entry - nothing to verify the name against"
+    exit 1
+fi
+
 hdr "unit tests"
 if python3 -m unittest discover -s scripts -p 'test_*.py' > "$WORK/unit.log" 2>&1; then
     ok "$(grep -oE 'Ran [0-9]+ tests' "$WORK/unit.log") OK"
@@ -188,9 +196,9 @@ else
     fi
 fi
 
-hdr "guest-only name for the gateway"
-# researchlabs.tech is an /etc/hosts entry docker writes into every guest, rendered
-# from config.yaml with the gateway ip this run's network actually got. config.yaml
+hdr "guest-only name for the gateway ($GUEST_HOST)"
+# the name is an /etc/hosts entry docker writes into every guest, rendered from
+# config.yaml with the gateway ip this run's network actually got. config.yaml
 # itself keeps the placeholder - what containerssh reads is the rendered copy, so
 # check that one, and check it is really the file that was mounted.
 if [ ! -f config.runtime.yaml ]; then
@@ -201,11 +209,11 @@ else
     else
         ok "no unrendered placeholder in config.runtime.yaml"
     fi
-    if grep -qF "\"researchlabs.tech:$GW\"" config.runtime.yaml; then
-        ok "researchlabs.tech -> $GW (this run's gateway)"
+    if grep -qF "\"$GUEST_HOST:$GW\"" config.runtime.yaml; then
+        ok "$GUEST_HOST -> $GW (this run's gateway)"
     else
-        bad "config.runtime.yaml does not map researchlabs.tech to $GW"
-        grep -n "researchlabs" config.runtime.yaml
+        bad "config.runtime.yaml does not map $GUEST_HOST to $GW"
+        grep -n "extrahosts" -A2 config.runtime.yaml
     fi
 fi
 if docker inspect containerssh -f '{{range .Mounts}}{{.Source}} {{end}}' 2>/dev/null \
@@ -215,12 +223,12 @@ else
     bad "containerssh is not mounting config.runtime.yaml - it is running an unrendered config"
 fi
 # and the entry is supposed to exist inside the guests and nowhere else. checked
-# against the gateway ip rather than "does not resolve at all": researchlabs.tech is
-# a real domain name, and a host with a resolver may well have an answer for it.
-if getent hosts researchlabs.tech 2>/dev/null | grep -q "$GW"; then
-    bad "the host itself resolves researchlabs.tech to $GW - that entry belongs in the guests only"
+# against the gateway ip rather than "does not resolve at all": the name is a real
+# domain name, and a host with a resolver may well have an answer for it.
+if getent hosts "$GUEST_HOST" 2>/dev/null | grep -q "$GW"; then
+    bad "the host itself resolves $GUEST_HOST to $GW - that entry belongs in the guests only"
 else
-    ok "the host does not resolve researchlabs.tech to the gateway"
+    ok "the host does not resolve $GUEST_HOST to the gateway"
 fi
 
 hdr "persisted rules"

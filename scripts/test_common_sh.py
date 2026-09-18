@@ -207,19 +207,19 @@ class LoadPortsTest(ShellHelperTest):
         self.assertIn("not found", result.stderr)
 
     def test_missing_variable_is_an_error(self):
-        path = self.env_file("SSH_PORT=2222\nAUTH_PORT=2223\n")
+        path = self.env_file("SSH_PORT=2200\nAUTH_PORT=2201\n")
         result = self.run_snippet("load_ports", env={"PLAYGROUND_ENV": path})
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("STATS_PORT", result.stderr)
 
     def test_non_numeric_port_is_an_error(self):
-        path = self.env_file("SSH_PORT=twenty-two\nAUTH_PORT=2223\nSTATS_PORT=2224\n")
+        path = self.env_file("SSH_PORT=twenty-two\nAUTH_PORT=2201\nSTATS_PORT=2202\n")
         result = self.run_snippet("load_ports", env={"PLAYGROUND_ENV": path})
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("SSH_PORT", result.stderr)
 
     def test_out_of_range_port_is_an_error(self):
-        path = self.env_file("SSH_PORT=2222\nAUTH_PORT=2223\nSTATS_PORT=70000\n")
+        path = self.env_file("SSH_PORT=2200\nAUTH_PORT=2201\nSTATS_PORT=70000\n")
         result = self.run_snippet("load_ports", env={"PLAYGROUND_ENV": path})
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("STATS_PORT", result.stderr)

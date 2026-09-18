@@ -26,6 +26,16 @@ IMG="attack_playground_image:latest"
 GW=$(docker network inspect "$NET" -f '{{(index .IPAM.Config 0).Gateway}}')
 echo "gateway: $GW"
 
+# the guests' name for the gateway, read out of config.yaml's extrahosts entry -
+# the one place it is defined - rather than repeated here, the same way the ports
+# below are read out of attack_network_endpoints.conf
+GUEST_HOST=$(python3 scripts/render_config.py hostname 2>/dev/null)
+if [ -z "$GUEST_HOST" ]; then
+    echo "error: config.yaml has no gateway hosts entry - nothing to probe the name with"
+    exit 1
+fi
+echo "guest name for the gateway: $GUEST_HOST"
+
 # the endpoints probed below follow attack_network_endpoints.conf rather than
 # repeating numbers from it: the first allowed port gets the host listener and
 # the second the published container
@@ -170,8 +180,8 @@ hdr "policy from inside the guest"
 if [ "$GUEST_UP" -ne 1 ]; then
     for p in "allowed endpoint $EP_HOST" "published endpoint $EP_PUBLISHED" "host port 22" \
              "host port $SSH_PORT" "internet" "lan by ip" "dns" "icmp to gateway" \
-             "researchlabs.tech resolves to the gateway" "researchlabs.tech:$EP_HOST" \
-             "researchlabs.tech:22 dropped" "/etc/hosts not writable" \
+             "$GUEST_HOST resolves to the gateway" "$GUEST_HOST:$EP_HOST" \
+             "$GUEST_HOST:22 dropped" "/etc/hosts not writable" \
              "nslookup present" "dns via nslookup" "disk fill"; do
         err "$p - no guest session"
     done
@@ -180,9 +190,9 @@ else
         nc -w 5 -z $GW $EP_HOST > /dev/null 2>&1; echo ALLOWED=\$?
         echo TOKEN=\$(curl -s -m 8 http://$GW:$EP_HOST/endpoint-token 2>/dev/null)
         nc -w 5 -z $GW $EP_PUBLISHED > /dev/null 2>&1; echo PUBLISHED=\$?
-        echo ALIAS_IP=\$(getent hosts researchlabs.tech 2>/dev/null | head -1 | awk '{print \$1}')
-        echo ALIAS_TOKEN=\$(curl -s -m 8 http://researchlabs.tech:$EP_HOST/endpoint-token 2>/dev/null)
-        nc -w 5 -z researchlabs.tech 22 > /dev/null 2>&1; echo ALIAS_SSH22=\$?
+        echo ALIAS_IP=\$(getent hosts $GUEST_HOST 2>/dev/null | head -1 | awk '{print \$1}')
+        echo ALIAS_TOKEN=\$(curl -s -m 8 http://$GUEST_HOST:$EP_HOST/endpoint-token 2>/dev/null)
+        nc -w 5 -z $GUEST_HOST 22 > /dev/null 2>&1; echo ALIAS_SSH22=\$?
         : > /etc/hosts 2>/dev/null; echo HOSTSW=\$?
         nc -w 5 -z $GW 22   > /dev/null 2>&1; echo SSH22=\$?
         nc -w 5 -z $GW $SSH_PORT > /dev/null 2>&1; echo CSSH=\$?
@@ -227,25 +237,25 @@ else
         err "published endpoint $EP_PUBLISHED - endpoint container not running"
     fi
 
-    # researchlabs.tech is an /etc/hosts entry docker writes into the guest
+    # the guest name is an /etc/hosts entry docker writes into the guest
     # (config.yaml, docker.execution.host.extrahosts). dns is blocked and the
     # "dns resolution fails" probe below proves it, so a name that resolves here
     # can only have come from that entry.
     ALIAS_IP=$(rc ALIAS_IP)
-    if   [ -z "$ALIAS_IP" ];      then bad "researchlabs.tech does not resolve inside the guest"
-    elif [ "$ALIAS_IP" = "$GW" ]; then ok "researchlabs.tech resolves to the gateway ($GW)"
-    else bad "researchlabs.tech resolves to $ALIAS_IP, not the gateway $GW"; fi
+    if   [ -z "$ALIAS_IP" ];      then bad "$GUEST_HOST does not resolve inside the guest"
+    elif [ "$ALIAS_IP" = "$GW" ]; then ok "$GUEST_HOST resolves to the gateway ($GW)"
+    else bad "$GUEST_HOST resolves to $ALIAS_IP, not the gateway $GW"; fi
     # ... and the name reaches the same host listener the gateway ip reaches
     ALIAS_TOKEN=$(rc ALIAS_TOKEN)
     if [ "$ALIAS_TOKEN" = "$ENDPOINT_TOKEN" ]; then
-        ok "researchlabs.tech:$EP_HOST reaches the host endpoint"
+        ok "$GUEST_HOST:$EP_HOST reaches the host endpoint"
     elif [ -z "$ALIAS_TOKEN" ]; then
-        bad "researchlabs.tech:$EP_HOST served nothing - the name does not resolve, or the endpoint is not reachable through it"
+        bad "$GUEST_HOST:$EP_HOST served nothing - the name does not resolve, or the endpoint is not reachable through it"
     else
-        bad "researchlabs.tech:$EP_HOST served a different token than the host listener"
+        bad "$GUEST_HOST:$EP_HOST served a different token than the host listener"
     fi
     # the name is an alias for the gateway, not an exception to the allowlist
-    check_blocked "researchlabs.tech:22 dropped like the gateway ip" ALIAS_SSH22
+    check_blocked "$GUEST_HOST:22 dropped like the gateway ip" ALIAS_SSH22
     # docker mounts /etc/hosts read-only into a readonlyrootfs container, so the name
     # cannot be repointed mid-session. checked rather than assumed: it is an engine
     # detail, and the file is root-owned inside the guest either way.
