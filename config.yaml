@@ -29,6 +29,33 @@ docker:
       # container.HostConfig.NetworkMode - attaches the guest to the restricted network.
       networkmode: "attack_playground_net"
 
+      # container.HostConfig.ExtraHosts - "<name>:<ip>" pairs docker writes into the
+      # guest's /etc/hosts. "researchlabs.tech" is the playground's own name for the
+      # bridge gateway, which is the address the attack endpoints are exposed on.
+      #
+      # a hosts entry rather than a dns record, for three reasons:
+      #   * it exists only inside a guest. the host's resolver, the containerssh and
+      #     auth containers, and every other container on this daemon are untouched -
+      #     nothing outside a guest resolves the name.
+      #   * it needs no packets. a guest may only open the tcp ports in
+      #     attack_network_endpoints.conf, so a resolver on the gateway would mean
+      #     punching udp/53 through the allowlist - and docker's embedded dns must
+      #     keep failing, which verify_guest.sh checks. glibc reads "files" before
+      #     "dns" (/etc/nsswitch.conf), so this entry answers without a query.
+      #   * the guest cannot edit it. with readonlyrootfs docker mounts /etc/hosts
+      #     read-only, so the name means the same thing for the whole session.
+      #
+      # the name is an alias, not a permission: researchlabs.tech:1337 is allowed
+      # because tcp/1337 on the gateway is, and researchlabs.tech:22 is dropped
+      # exactly like the gateway ip on 22.
+      #
+      # __GATEWAY_IP__ is filled in by scripts/render_config.py, which start.sh runs
+      # once the network exists - docker picks the subnet when it creates the network,
+      # so the gateway address cannot be written down here. containerssh reads the
+      # rendered copy (config.runtime.yaml), never this file; see docker-compose.yaml.
+      extrahosts:
+        - "researchlabs.tech:__GATEWAY_IP__"
+
       # A guest is an untrusted shell that anyone on the lan can open. Everything
       # below bounds what one guest - or a lan full of them - can cost the host.
       # The concurrency cap itself is an iptables connlimit on port 2222, see

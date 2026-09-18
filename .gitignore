@@ -7,4 +7,8 @@ __pycache__/
 host.key
 host.key.pub
 
+# rendered by start.sh from config.yaml - carries the gateway ip of the docker
+# network on this host, which is not the same anywhere else
+config.runtime.yaml
+
 .DS_Store

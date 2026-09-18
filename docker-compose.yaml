@@ -15,7 +15,14 @@ services:
     ports:
       - "2222:2222"
     volumes:
-      - ./config.yaml:/etc/containerssh/config.yaml:ro
+      # config.runtime.yaml, not config.yaml: the guests' /etc/hosts entry for
+      # researchlabs.tech points at the gateway of attack_playground_net, and docker
+      # only numbers that network when it creates it. start.sh renders the tracked
+      # config.yaml into this file once the network exists - see
+      # scripts/render_config.py. bring the playground up with ./start.sh, not with
+      # "docker compose up": without the rendered file docker mounts an empty
+      # directory here and containerssh comes up with no config at all.
+      - ./config.runtime.yaml:/etc/containerssh/config.yaml:ro
       - ./host.key:/etc/containerssh/host.key:ro
       - /var/run/docker.sock:/var/run/docker.sock
     networks:
