@@ -360,11 +360,29 @@ destination** and a decremented ttl:
 172.24.0.2:34400 > 172.18.0.15:<port>  [S] ttl 63     # what actually went on the wire
 ```
 
-so it is checked on the host instead, against the `nat` table rather than by probing:
-`setup_networking_linux.py` warns about it at startup, and `verify.sh` fails on it. it is
-a warning at setup and not a refusal to start, because publishing an endpoint as a
-container is a supported way to run one - doing it by accident on a port the host is also
-serving is not.
+so it is checked on the host instead, against the `nat` table rather than by probing.
+
+the `nat` table alone cannot say whether this is a fault, though: publishing an endpoint
+as a container is a **supported** way to run one - `ATTACK_PG_FWD` allows exactly it - so
+on a playground whose endpoints are all containers every endpoint would look like a
+conflict, and the warning would be noise on every start. what makes it a fault is the
+host serving that port *too*. so the socket table decides
+(`find_shadowed_endpoints()` in `scripts/network_common_linux.py`):
+
+  * a host process listening on `<gateway>:<port>`, or on a wildcard, means a real
+    service has been taken over - a warning at setup and a failure in `verify.sh`.
+  * nothing bound there means the container **is** the endpoint - reported as that, and
+    nothing fails.
+
+docker's own userland proxy is skipped when reading the socket table: it holds every
+published host port open, so counting it would mark every containerised endpoint as
+shadowed. that is why `ss` is run privileged - the process name behind the socket is what
+separates the proxy from a real service. a socket table that cannot be read at all is a
+failure rather than a pass: it cannot tell the two apart, and this is invisible from a
+guest.
+
+it is a warning at setup and not a refusal to start, because the guests are not more
+exposed either way - only the operator's idea of what is on that port is wrong.
 
 `verify_guest.sh` additionally makes the host-listener probe (on the first port the
 config allows) prove *which* listener answered: the host listener serves a random token, the guest fetches it, and a missing or different
