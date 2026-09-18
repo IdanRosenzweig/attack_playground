@@ -20,7 +20,7 @@ from network_common_linux import (
     ensure_chain, ensure_chain_closed, ensure_hook, ensure_jump,
     ensure_docker_user_chain,
     ensure_bridge_netfilter, ip6tables_available, remove_legacy_rules,
-    parse_config, find_config,
+    parse_config, find_config, find_endpoint_conflicts,
 )
 
 CHAINS = (INPUT_CHAIN, FORWARD_CHAIN, FORWARD_IN_CHAIN)
@@ -150,6 +150,33 @@ def apply_ipv6_restrictions(bridge_if):
     return True
 
 
+def report_endpoint_conflicts(ranges):
+    """
+    warn when a container publishes a host port inside an endpoint range.
+
+    that port stops being a host endpoint: docker's DNAT rule in nat/PREROUTING runs
+    before the routing decision, so the guest is rewritten to the container and
+    forwarded, and ATTACK_PG_INPUT - the allowlist that is supposed to guard host
+    endpoints - never sees the packet. the connection still succeeds, so nothing
+    downstream notices; only the operator's idea of what is on that port is wrong.
+
+    this is a warning rather than a failure. publishing an endpoint as a container
+    is a supported way to run one (build_forward_chains allows exactly that), and
+    the policy is not widened either way - the FORWARD allow is still keyed on the
+    original destination being an allowed port on the gateway. what is not supported
+    is doing it *by accident* on a port the host is also serving.
+    """
+    conflicts = find_endpoint_conflicts(ranges)
+    for host_port, target, rng in conflicts:
+        print(f"  warning: tcp {host_port} (in endpoint range {rng}) is published by a"
+              f" container at {target}.")
+        print("           guests dialling the gateway on that port are DNATed to the"
+              " container before INPUT,")
+        print("           so ATTACK_PG_INPUT never sees them and a host service on that"
+              " port is shadowed.")
+    return conflicts
+
+
 def apply_restrictions(bridge_if, gateway_ip, ranges):
     print(f"applying restrictions on {bridge_if} (gateway {gateway_ip})")
 
@@ -190,6 +217,8 @@ def apply_restrictions(bridge_if, gateway_ip, ranges):
         print(f"  cap concurrent ssh connections on port {SSH_PORT} at {MAX_SSH_CONNECTIONS}")
 
     apply_ipv6_restrictions(bridge_if)
+
+    report_endpoint_conflicts(ranges)
 
     # the rules are deliberately *not* persisted with netfilter-persistent: that
     # would also freeze docker's own dynamic nat/filter rules into a file that is

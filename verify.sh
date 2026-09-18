@@ -74,6 +74,56 @@ sudo iptables -S DOCKER-USER | grep -q "ATTACK_PG_FWD" && ok "DOCKER-USER -> ATT
 sudo iptables -n -L DOCKER-USER | head -1 | grep -q "0 references" \
     && bad "DOCKER-USER has 0 references (chain is dead)" || ok "DOCKER-USER is referenced"
 
+hdr "endpoint shadowing"
+# an allowed endpoint is supposed to be a service on the host, reached through
+# ATTACK_PG_INPUT. if a container publishes a host port inside one of the ranges,
+# docker's DNAT rule in nat/PREROUTING takes that port over: the guest's packet is
+# rewritten to the container before the routing decision, travels FORWARD, and the
+# INPUT allowlist never sees it. the connection still succeeds, so a "nc -z" probe
+# cannot tell the two apart - this check reads the nat table instead.
+SHADOW=$(python3 - <<'PY' 2>/dev/null
+import os, sys
+sys.path.insert(0, os.path.join(os.getcwd(), "scripts"))
+import network_common_linux as nc
+config = nc.find_config()
+ranges = nc.parse_config(config) if config else []
+for host_port, target, rng in nc.find_endpoint_conflicts(ranges):
+    print(host_port, target, rng)
+PY
+)
+if [ -z "$SHADOW" ]; then
+    ok "no configured endpoint is shadowed by a published container port"
+else
+    while read -r port target rng; do
+        [ -z "$port" ] && continue
+        bad "tcp $port (endpoint range $rng) is published by $target - dialling the gateway there reaches the container, not the host, and skips ATTACK_PG_INPUT"
+    done <<< "$SHADOW"
+fi
+
+# docker hands out dynamic host ports ("-p 80" with no host side) from the kernel's
+# ip_local_port_range, so a range that overlaps it can be taken over by a container
+# nobody published deliberately.
+EPHEMERAL=$(sysctl -n net.ipv4.ip_local_port_range 2>/dev/null)
+if [ -n "$EPHEMERAL" ]; then
+    OVERLAP=$(python3 - "$EPHEMERAL" <<'PY' 2>/dev/null
+import os, sys
+sys.path.insert(0, os.path.join(os.getcwd(), "scripts"))
+import network_common_linux as nc
+lo, hi = (int(x) for x in sys.argv[1].split())
+config = nc.find_config()
+for rng in (nc.parse_config(config) if config else []):
+    start, end = nc.range_bounds(rng)
+    if start <= hi and lo <= end:
+        print(rng)
+PY
+)
+    if [ -z "$OVERLAP" ]; then
+        ok "no endpoint range overlaps docker's dynamic publish range ($EPHEMERAL)"
+    else
+        bad "endpoint range(s) $(echo $OVERLAP | tr '\n' ' ')overlap docker's dynamic publish range ($EPHEMERAL) - an unrelated container can be assigned one of these host ports and become guest-reachable"
+    fi
+fi
+
 hdr "ipv6 mirror"
 if sudo ip6tables -n -L ATTACK_PG_INPUT > /dev/null 2>&1; then
     sudo ip6tables -S ATTACK_PG_INPUT | tail -1 | grep -q -- "-j DROP" \
@@ -95,6 +145,41 @@ docker ps --format '{{.Ports}}' | grep -q "127.0.0.1:2223" \
 # a docker-restarted containerssh would come back after a reboot with no chains
 RP=$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' containerssh 2>/dev/null)
 [ "$RP" = "no" ] && ok "containerssh restart policy is 'no'" || bad "containerssh restart policy is '$RP' (must be 'no')"
+
+hdr "guest-only name for the gateway"
+# researchlabs.tech is an /etc/hosts entry docker writes into every guest, rendered
+# from config.yaml with the gateway ip this run's network actually got. config.yaml
+# itself keeps the placeholder - what containerssh reads is the rendered copy, so
+# check that one, and check it is really the file that was mounted.
+if [ ! -f config.runtime.yaml ]; then
+    bad "config.runtime.yaml was not rendered (start.sh renders it from config.yaml)"
+else
+    if grep -q "__GATEWAY_IP__" config.runtime.yaml; then
+        bad "config.runtime.yaml still holds the __GATEWAY_IP__ placeholder - guests would fail to start"
+    else
+        ok "no unrendered placeholder in config.runtime.yaml"
+    fi
+    if grep -qF "\"researchlabs.tech:$GW\"" config.runtime.yaml; then
+        ok "researchlabs.tech -> $GW (this run's gateway)"
+    else
+        bad "config.runtime.yaml does not map researchlabs.tech to $GW"
+        grep -n "researchlabs" config.runtime.yaml
+    fi
+fi
+if docker inspect containerssh -f '{{range .Mounts}}{{.Source}} {{end}}' 2>/dev/null \
+     | grep -q "config.runtime.yaml"; then
+    ok "containerssh is running with the rendered config"
+else
+    bad "containerssh is not mounting config.runtime.yaml - it is running an unrendered config"
+fi
+# and the entry is supposed to exist inside the guests and nowhere else. checked
+# against the gateway ip rather than "does not resolve at all": researchlabs.tech is
+# a real domain name, and a host with a resolver may well have an answer for it.
+if getent hosts researchlabs.tech 2>/dev/null | grep -q "$GW"; then
+    bad "the host itself resolves researchlabs.tech to $GW - that entry belongs in the guests only"
+else
+    ok "the host does not resolve researchlabs.tech to the gateway"
+fi
 
 hdr "persisted rules"
 # netfilter-persistent would freeze docker's dynamic rules into a file that is

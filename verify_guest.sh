@@ -43,6 +43,13 @@ guest() { sshpass -p anything ssh $SSH_OPTS -p 2222 guestuser@127.0.0.1 "$1" 2>&
 guests_up() { docker ps -q --filter ancestor="$IMG" | grep -c . ; }
 
 hdr "host listener on an allowed endpoint (1337)"
+# the token identifies *this* listener. "nc -z" only proves that something answered
+# on the port, and if a container publishes host port 1337 docker's DNAT rule in
+# nat/PREROUTING takes the port over - the guest is forwarded to the container
+# before INPUT, the probe still succeeds, and ATTACK_PG_INPUT is never exercised.
+# fetching the token is what tells the host listener apart from a container.
+ENDPOINT_TOKEN=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')
+printf '%s' "$ENDPOINT_TOKEN" > "$WORK/endpoint-token"
 nohup python3 -m http.server 1337 --bind "$GW" --directory "$WORK" > "$WORK/listener.log" 2>&1 &
 LISTENER=$!
 sleep 2
@@ -123,13 +130,20 @@ hdr "policy from inside the guest"
 if [ "$GUEST_UP" -ne 1 ]; then
     for p in "allowed endpoint 1337" "published endpoint 1338" "host port 22" \
              "host port 2222" "internet" "lan by ip" "dns" "icmp to gateway" \
+             "researchlabs.tech resolves to the gateway" "researchlabs.tech:1337" \
+             "researchlabs.tech:22 dropped" "/etc/hosts not writable" \
              "disk fill"; do
         err "$p - no guest session"
     done
 else
     PROBES=$(guest "
         nc -w 5 -z $GW 1337 > /dev/null 2>&1; echo ALLOWED=\$?
+        echo TOKEN=\$(curl -s -m 8 http://$GW:1337/endpoint-token 2>/dev/null)
         nc -w 5 -z $GW 1338 > /dev/null 2>&1; echo PUBLISHED=\$?
+        echo ALIAS_IP=\$(getent hosts researchlabs.tech 2>/dev/null | head -1 | awk '{print \$1}')
+        echo ALIAS_TOKEN=\$(curl -s -m 8 http://researchlabs.tech:1337/endpoint-token 2>/dev/null)
+        nc -w 5 -z researchlabs.tech 22 > /dev/null 2>&1; echo ALIAS_SSH22=\$?
+        : > /etc/hosts 2>/dev/null; echo HOSTSW=\$?
         nc -w 5 -z $GW 22   > /dev/null 2>&1; echo SSH22=\$?
         nc -w 5 -z $GW 2222 > /dev/null 2>&1; echo CSSH=\$?
         curl -s -m 8 -o /dev/null https://example.com; echo NET=\$?
@@ -155,11 +169,45 @@ else
         else bad "$1 NOT reachable (rc=$v) - allowlist too strict"; fi
     }
     check_allowed "allowed endpoint 1337" ALLOWED
+    # and prove it was the host listener that answered, not a container that
+    # published the same host port - see the token comment above
+    GOT_TOKEN=$(rc TOKEN)
+    if [ -z "$GOT_TOKEN" ]; then
+        bad "allowed endpoint 1337 answered but served no token - port 1337 is not the host listener (published by a container?)"
+    elif [ "$GOT_TOKEN" = "$ENDPOINT_TOKEN" ]; then
+        ok "allowed endpoint 1337 is the host listener (INPUT path exercised)"
+    else
+        bad "allowed endpoint 1337 served a different token - the host listener is shadowed by something else on that port"
+    fi
     if [ -n "$ENDPOINT_CTR" ]; then
         check_allowed "published endpoint 1338 (via FORWARD)" PUBLISHED
     else
         err "published endpoint 1338 - endpoint container not running"
     fi
+
+    # researchlabs.tech is an /etc/hosts entry docker writes into the guest
+    # (config.yaml, docker.execution.host.extrahosts). dns is blocked and the
+    # "dns resolution fails" probe below proves it, so a name that resolves here
+    # can only have come from that entry.
+    ALIAS_IP=$(rc ALIAS_IP)
+    if   [ -z "$ALIAS_IP" ];      then bad "researchlabs.tech does not resolve inside the guest"
+    elif [ "$ALIAS_IP" = "$GW" ]; then ok "researchlabs.tech resolves to the gateway ($GW)"
+    else bad "researchlabs.tech resolves to $ALIAS_IP, not the gateway $GW"; fi
+    # ... and the name reaches the same host listener the gateway ip reaches
+    ALIAS_TOKEN=$(rc ALIAS_TOKEN)
+    if [ "$ALIAS_TOKEN" = "$ENDPOINT_TOKEN" ]; then
+        ok "researchlabs.tech:1337 reaches the host endpoint"
+    elif [ -z "$ALIAS_TOKEN" ]; then
+        bad "researchlabs.tech:1337 served nothing - the name does not resolve, or the endpoint is not reachable through it"
+    else
+        bad "researchlabs.tech:1337 served a different token than the host listener"
+    fi
+    # the name is an alias for the gateway, not an exception to the allowlist
+    check_blocked "researchlabs.tech:22 dropped like the gateway ip" ALIAS_SSH22
+    # docker mounts /etc/hosts read-only into a readonlyrootfs container, so the name
+    # cannot be repointed mid-session. checked rather than assumed: it is an engine
+    # detail, and the file is root-owned inside the guest either way.
+    check_blocked "guest cannot rewrite /etc/hosts" HOSTSW
 
     check_blocked "host port 22 dropped"    SSH22
     check_blocked "host port 2222 dropped"  CSSH

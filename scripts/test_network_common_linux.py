@@ -279,5 +279,67 @@ class MissingBinaryTest(unittest.TestCase):
                 nc.run_iptables(nc.IPTABLES, ["-n", "-L", "INPUT"], ignore_error=True))
 
 
+class EndpointShadowingTest(unittest.TestCase):
+    """
+    a container that publishes a host port inside an endpoint range takes that port
+    over: docker's nat/PREROUTING DNAT runs before the routing decision, so the guest
+    never reaches INPUT and ATTACK_PG_INPUT never sees the packet. the connection
+    still succeeds, so this has to be found by reading the nat table.
+    """
+
+    # what docker actually writes into nat/DOCKER
+    RULES = [
+        "-N DOCKER",
+        "-A DOCKER -i br-playground -j RETURN",
+        "-A DOCKER ! -i br-playground -p tcp -m tcp --dport 2222 "
+        "-j DNAT --to-destination 172.18.0.4:2222",
+        "-A DOCKER ! -i br-playground -p tcp -m tcp --dport 1337 "
+        "-j DNAT --to-destination 172.18.0.15:1337",
+        "-A DOCKER -d 127.0.0.1/32 ! -i br-playground -p tcp -m tcp --dport 2223 "
+        "-j DNAT --to-destination 172.18.0.3:8080",
+    ]
+
+    def test_range_bounds(self):
+        self.assertEqual(nc.range_bounds("1337-1355"), (1337, 1355))
+        self.assertEqual(nc.range_bounds("1337"), (1337, 1337))
+
+    def test_parses_published_ports(self):
+        self.assertEqual(
+            nc.parse_published_ports(self.RULES),
+            [(2222, "172.18.0.4:2222"), (1337, "172.18.0.15:1337")])
+
+    def test_loopback_publish_is_not_a_conflict(self):
+        # "127.0.0.1:2223:8080" can never be reached from the bridge
+        ports = [p for p, _ in nc.parse_published_ports(self.RULES)]
+        self.assertNotIn(2223, ports)
+
+    def test_reports_a_port_inside_an_endpoint_range(self):
+        published = nc.parse_published_ports(self.RULES)
+        self.assertEqual(
+            nc.endpoint_conflicts(["1337-1355"], published),
+            [(1337, "172.18.0.15:1337", "1337-1355")])
+
+    def test_ignores_published_ports_outside_every_range(self):
+        published = nc.parse_published_ports(self.RULES)
+        self.assertEqual(nc.endpoint_conflicts(["2337-2340"], published), [])
+
+    def test_matches_a_bare_single_port_range(self):
+        self.assertEqual(
+            nc.endpoint_conflicts(["1337"], [(1337, "172.18.0.15:1337")]),
+            [(1337, "172.18.0.15:1337", "1337")])
+
+    def test_range_boundaries_are_inclusive(self):
+        published = [(1337, "a:1"), (1355, "b:1"), (1356, "c:1")]
+        found = [p for p, _, _ in nc.endpoint_conflicts(["1337-1355"], published)]
+        self.assertEqual(found, [1337, 1355])
+
+    def test_no_nat_chain_is_not_a_conflict(self):
+        # a host where the DOCKER chain does not exist must not look "clean by error"
+        # in a way that raises - it reports nothing and the caller carries on
+        with mock.patch.object(nc.subprocess, "check_output",
+                               side_effect=FileNotFoundError):
+            self.assertEqual(nc.find_endpoint_conflicts(["1337-1355"]), [])
+
+
 if __name__ == "__main__":
     unittest.main()

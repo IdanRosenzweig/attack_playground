@@ -14,6 +14,11 @@
 `scripts/common.sh`: shared helpers for the lifecycle scripts - the host preflight,
 `as_root`, and compose resolution
 
+`config.yaml`: the containerssh config - the guest image, the restricted network and the
+limits a guest runs under. it carries a placeholder for the docker network's gateway ip;
+`start.sh` renders it into `config.runtime.yaml` (generated, gitignored) with
+`scripts/render_config.py`, and containerssh mounts *that* - see *researchlabs.tech* below
+
 `systemd/attack-playground.service`: brings the playground up at boot *through*
 `start.sh` - see *surviving a reboot* below
 
@@ -213,6 +218,98 @@ accepting ssh connections - and spawning guests on this network - the moment it 
 so applying them afterwards leaves a window in which a guest is live and unrestricted. if
 setup fails, `start.sh` refuses to launch the services at all.
 
+### a published port shadows the host endpoint behind it
+
+the DNAT above is keyed on the **port**, not on who is supposed to own it. docker's rule
+in `nat/DOCKER` is `! -i <its own bridge> -p tcp --dport <port> -j DNAT`, and `PREROUTING`
+runs before the routing decision - so if any container publishes a host port that falls
+inside one of the configured endpoint ranges, a guest dialling `<gateway>:<that port>` is
+rewritten to the container and forwarded. it never reaches `INPUT`, and `ATTACK_PG_INPUT`
+never sees it. a host process listening on the same port of the gateway keeps its socket
+and silently stops receiving guest connections.
+
+the policy is not widened by this - the `ATTACK_PG_FWD` accept is still keyed on the
+original destination being an allowed port on the gateway - but two things break quietly:
+
+  * the endpoint is not what the operator thinks it is. the guest reaches a container,
+    not the host service.
+  * the check meant to exercise `ATTACK_PG_INPUT` exercises `ATTACK_PG_FWD` instead, so
+    the INPUT allowlist goes untested and a regression there would not be caught.
+
+it is invisible from the guest, because a connect-and-close probe cannot tell the two
+apart. in a capture the give-away is that the packet leaves with a **rewritten
+destination** and a decremented ttl:
+
+```
+172.24.0.2:34400 > 172.24.0.1:1337   [S] ttl 64     # what the guest dialled
+172.24.0.2:34400 > 172.18.0.15:1337  [S] ttl 63     # what actually went on the wire
+```
+
+so it is checked on the host instead, against the `nat` table rather than by probing:
+`setup_networking_linux.py` warns about it at startup, and `verify.sh` fails on it. it is
+a warning at setup and not a refusal to start, because publishing an endpoint as a
+container is a supported way to run one - doing it by accident on a port the host is also
+serving is not.
+
+`verify_guest.sh` additionally makes the 1337 probe prove *which* listener answered: the
+host listener serves a random token, the guest fetches it, and a missing or different
+token fails the check even though the connection succeeded.
+
+for the same reason an endpoint range should not overlap the kernel's
+`net.ipv4.ip_local_port_range` (commonly `32768-60999`), which is where docker draws
+**dynamic** host ports from when a container publishes a port without naming the host
+side (`-p 80`). a range that overlaps it can be taken over by a container nobody
+published deliberately. the shipped `40000-40100` range does overlap it, and `verify.sh`
+reports that.
+
+### researchlabs.tech, a guest-only name for the gateway
+
+inside a guest, `researchlabs.tech` resolves to the gateway ip of
+`attack_playground_net` - the address the attack endpoints are exposed on. it is an
+`/etc/hosts` entry, configured in `config.yaml` under
+`docker.execution.host.extrahosts` (docker's `HostConfig.ExtraHosts`) and written by
+docker into every guest container it creates:
+
+```
+extrahosts:
+  - "researchlabs.tech:<gateway ip>"
+```
+
+a hosts entry rather than a dns record, for three reasons:
+
+  * **it exists only inside a guest.** the host's own resolver, the `containerssh` and
+    auth containers, and every other container on the daemon are untouched - nothing
+    outside a guest resolves the name. `verify.sh` checks that the *host* does not
+    resolve it to the gateway.
+  * **it needs no packets.** a guest may only open the tcp ports in
+    `attack_network_endpoints.conf`, so a resolver on the gateway would mean punching
+    udp/53 through the allowlist - and docker's embedded dns has to keep failing, which
+    `verify_guest.sh` checks. glibc consults `files` before `dns` (`/etc/nsswitch.conf`),
+    so the entry answers without a query ever leaving the container.
+  * **the guest cannot edit it.** with `readonlyrootfs` docker mounts `/etc/hosts`
+    read-only, so the name means the same thing for the whole session.
+
+the name is an **alias, not a permission**. `researchlabs.tech:1337` works because
+tcp/1337 on the gateway is in the allowlist; `researchlabs.tech:22` is dropped exactly
+like the gateway ip on 22. nothing in the iptables policy knows about the name.
+
+#### the containerssh config is rendered, not static
+
+docker numbers `attack_playground_net` when it creates it, so the gateway address is not
+known until then and cannot be written down in a tracked file. `config.yaml` carries a
+`__GATEWAY_IP__` placeholder instead; `start.sh` runs `scripts/render_config.py` once the
+network exists and writes `config.runtime.yaml`, and **that** is the file
+`docker-compose.yaml` mounts into containerssh. it is generated per host, gitignored, and
+removed by `cleanup.sh` along with the network it describes.
+
+this is why the playground has to be brought up with `./start.sh` (or the systemd unit,
+which runs it) rather than with `docker compose up`: without the rendered file docker
+mounts an empty directory over the config path and containerssh comes up with no config
+at all. rendering refuses - and with it `start.sh` - on a missing network, a missing or
+empty gateway, an address that is not ipv4, or a `config.yaml` with the placeholder
+edited out. the alternative is a config containerssh loads happily and that only fails
+when it creates the first guest, i.e. at someone's first ssh login.
+
 ### fail-closed chains
 
 each chain is rebuilt **deny-first**: it is flushed, given its terminal `DROP`, and only
@@ -272,11 +369,14 @@ also clears the flat `DOCKER-USER` rules written by earlier versions.
 `./verify.sh` runs the host checks below and reports pass/fail: the unit tests,
 `start.sh`, every chain and its terminal `DROP`, the hooks, the forward allow for
 published endpoints, the ssh cap, the ipv6 mirror, both sysctls, the loopback binding,
-the restart policy and that nothing was persisted to `/etc/iptables`. `./verify_guest.sh`
+the restart policy, the rendered guest hosts entry (and that the host itself does not
+resolve `researchlabs.tech` to the gateway) and that nothing was persisted to
+`/etc/iptables`. `./verify_guest.sh`
 then proves the policy from inside real guest containers: the host and published
 endpoints are reachable, everything else (other host ports, the internet, the lan, dns,
-icmp, the other guest over ipv4 and ipv6 link-local) is not, and the guest hardening
-took effect. its test listener is bound to the gateway ip and serves an empty
+icmp, the other guest over ipv4 and ipv6 link-local) is not, `researchlabs.tech` resolves
+to the gateway and reaches the same host listener while still being dropped on a port
+outside the allowlist, and the guest hardening took effect. its test listener is bound to the gateway ip and serves an empty
 directory - the repo contains the ssh host private key, so it must never be what gets
 served. both need `sshpass` and `netcat-openbsd` on the host, and a playground that is
 not already running. a probe that could not run is reported as "not tested" rather
@@ -300,10 +400,15 @@ then ssh in and confirm the guest is actually restricted:
 ```
 docker inspect -f '{{json .NetworkSettings.Networks}}' <guest-container>   # attack_playground_net only
 nc -vz <gateway-ip> 1337        # allowed endpoint, must succeed
+curl -s <gateway-ip>:1337/     # ... and must be the *host* listener, not a
+                               # container that published the same host port
 nc -vz <gateway-ip> 22          # must fail
 nc -6 -vz <host-link-local>%eth0 22   # must fail
 curl -m 5 https://example.com   # must fail
 getent hosts example.com        # must fail - docker's embedded dns must not forward
+getent hosts researchlabs.tech  # must print the gateway ip - guests only
+nc -vz researchlabs.tech 1337   # allowed endpoint, reached by name
+nc -vz researchlabs.tech 22     # must fail - the name is an alias, not a permission
 nc -vz <other-guest-ip> <port>  # must fail
 nc -6 -vz <other-guest-link-local>%eth0 <port>  # must fail
 ```
@@ -313,7 +418,8 @@ note that icmp to the gateway is dropped as well, so `ping <gateway-ip>` failing
 ### tests
 
 the config parsing, the fail-closed chain construction, the forward allow for published
-endpoints, the ssh cap and the webhook contract have unit tests. they are stdlib only
+endpoints, the ssh cap, the containerssh config rendering and the webhook contract have
+unit tests. they are stdlib only
 and need neither root nor docker:
 
 ```
