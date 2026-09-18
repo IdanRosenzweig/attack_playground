@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
 regression tests for render_config.py, which fills the docker network's gateway ip
-into the containerssh config so guests resolve researchlabs.tech to it.
+into the containerssh config so the guests resolve the playground's gateway name to
+it.
+
+the name itself is deliberately absent from this file: config.yaml's extrahosts entry
+defines it, render_config.py reads it back from there, and these tests use a stand-in
+of their own - RepoTemplateTest below is what checks the tracked config.
 
 stdlib only, and no docker or root needed. run with:
 
@@ -20,18 +25,47 @@ import render_config as rc  # noqa: E402
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# a stand-in name, not the shipped one: these tests are about the substitution, and
+# the shipped name lives in config.yaml alone
+HOSTNAME = "gateway.test"
+
 TEMPLATE = (
     "docker:\n"
     "  execution:\n"
     "    host:\n"
     "      extrahosts:\n"
-    f'        - "{rc.GUEST_HOSTNAME}:{rc.GATEWAY_PLACEHOLDER}"\n'
+    f'        - "{HOSTNAME}:{rc.GATEWAY_PLACEHOLDER}"\n'
 )
+
+
+class GuestHostnameTest(unittest.TestCase):
+    """the name is read out of the template, never hard coded next to it."""
+
+    def test_reads_the_name_in_front_of_the_placeholder(self):
+        self.assertEqual(rc.guest_hostname(TEMPLATE), HOSTNAME)
+
+    def test_an_unquoted_entry_is_read_too(self):
+        entry = f"      extrahosts:\n        - {HOSTNAME}:{rc.GATEWAY_PLACEHOLDER}\n"
+        self.assertEqual(rc.guest_hostname(entry), HOSTNAME)
+
+    def test_a_renamed_host_is_followed(self):
+        # the point of reading it back: a rename in config.yaml needs no other edit
+        renamed = TEMPLATE.replace(HOSTNAME, "somewhere.else")
+        self.assertEqual(rc.guest_hostname(renamed), "somewhere.else")
+
+    def test_a_placeholder_outside_a_hosts_entry_is_an_error(self):
+        # the guests would come up with no entry at all and nothing would say so
+        with self.assertRaises(ValueError):
+            rc.guest_hostname(f"docker:\n  execution: {rc.GATEWAY_PLACEHOLDER}\n")
+
+    def test_a_template_with_no_entry_is_an_error(self):
+        with self.assertRaises(ValueError):
+            rc.guest_hostname("docker:\n  execution:\n")
 
 
 class RenderTest(unittest.TestCase):
     def test_places_the_gateway_next_to_the_hostname(self):
-        self.assertIn(f'"{rc.GUEST_HOSTNAME}:172.18.0.1"', rc.render(TEMPLATE, "172.18.0.1"))
+        self.assertIn(f'"{HOSTNAME}:172.18.0.1"', rc.render(TEMPLATE, "172.18.0.1"))
 
     def test_nothing_unrendered_is_left_behind(self):
         # a leftover placeholder is a config the docker daemon only rejects when it
@@ -42,7 +76,7 @@ class RenderTest(unittest.TestCase):
         rendered = rc.render(TEMPLATE + TEMPLATE, "10.9.9.1")
         self.assertEqual(rendered.count("10.9.9.1"), 2)
 
-    def test_template_without_the_placeholder_is_an_error(self):
+    def test_template_without_the_hosts_entry_is_an_error(self):
         # the config and the renderer would silently disagree: the guests would come
         # up with no entry at all and nothing would say so
         with self.assertRaises(ValueError):
@@ -105,9 +139,15 @@ class RepoTemplateTest(unittest.TestCase):
     def test_config_yaml_still_carries_the_placeholder(self):
         self.assertIn(rc.GATEWAY_PLACEHOLDER, self.template)
 
+    def test_config_yaml_names_the_guests_gateway_host(self):
+        # whatever it is called, it has to be readable from the entry - that is how
+        # start.sh and the verify scripts learn the name
+        self.assertTrue(rc.guest_hostname(self.template))
+
     def test_config_yaml_renders_to_a_hosts_entry_on_the_gateway(self):
+        hostname = rc.guest_hostname(self.template)
         rendered = rc.render(self.template, "10.9.9.1")
-        self.assertIn(f'- "{rc.GUEST_HOSTNAME}:10.9.9.1"', rendered)
+        self.assertIn(f'- "{hostname}:10.9.9.1"', rendered)
 
     def test_the_entry_sits_under_the_host_section(self):
         # docker.execution.host maps to docker's HostConfig; under "container" (or
