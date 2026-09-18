@@ -75,6 +75,49 @@ services:
       - containerssh_net
     logging: *logging
 
+  playground-stats:
+    image: python:3.11-slim
+    # follows the playground lifecycle like the other services: brought up by
+    # start.sh, taken down by stop.sh, never restarted by docker on its own.
+    restart: "no"
+    # stdlib only, nothing to install - see stats_server.py for what is counted
+    # and for the api. -u so the session log is not stuck in a buffer.
+    command: ["python", "-u", "/app/stats_server.py"]
+    environment:
+      # the image guests are created from (docker.execution.container.image in
+      # config.yaml): a container from any other image is not a user
+      GUEST_IMAGE: "attack_playground_image:latest"
+      # the "connected in the last ..." window when a request does not name one
+      # with ?window=: seconds, or a count with s, m, h or d
+      STATS_WINDOW: "1h"
+    volumes:
+      - ./stats_server.py:/app/stats_server.py:ro
+      # a session is a guest container starting and dying, read off the docker
+      # event stream. this socket is root on the host: the stats server only ever
+      # sends GET requests over it, but ":ro" does not enforce that - it makes the
+      # socket file unwritable, not the api behind it.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # the sqlite file the sessions live in, so "ever connected" survives
+      # restarts of the playground. created root-owned on first start; cleanup.sh
+      # leaves it alone, and "rm -rf stats_data" starts the count over.
+      - ./stats_data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import socket; socket.create_connection(('127.0.0.1', 8081), 2).close()"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 2s
+    ports:
+      # loopback only, like the auth webhook: nothing needs this from the lan, and
+      # a published port is DNATed before the host firewall sees it. read it with
+      #   curl http://127.0.0.1:2224/stats
+      # or tunnel it from elsewhere: ssh -L 2224:127.0.0.1:2224 <host>
+      - "127.0.0.1:2224:8081"
+    networks:
+      - containerssh_net
+    logging: *logging
+
 networks:
   containerssh_net:
     driver: bridge

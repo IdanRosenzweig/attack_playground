@@ -88,6 +88,37 @@ else
     bad "cannot open a guest session: $CANARY"; GUEST_UP=0
 fi
 
+hdr "connection statistics"
+# two hold sessions are open and the canary has come and gone: "right now" must
+# be exactly the running guests, and the window must count the canary on top of
+# them - which is the session-ended path. the history is never assumed fresh, so
+# "ever" is only a lower bound.
+if [ "$GUEST_UP" -ne 1 ]; then
+    err "connection statistics - no guest session"
+else
+    sleep 2   # the canary's guest is torn down just after its session ends
+    STATS=$(python3 - <<'PY' 2>/dev/null
+import json, urllib.request
+with urllib.request.urlopen("http://127.0.0.1:2224/stats", timeout=5) as r:
+    s = json.load(r)
+print(s["currently_connected"], s["connected_in_window"], s["ever_connected"])
+PY
+)
+    N=$(guests_up)
+    if [ -z "$STATS" ]; then
+        err "connection statistics - stats server did not answer on 127.0.0.1:2224"
+    else
+        read -r S_NOW S_WIN S_EVER <<< "$STATS"
+        echo "  stats: now=$S_NOW window=$S_WIN ever=$S_EVER (guests running: $N)"
+        [ "$S_NOW" -eq "$N" ] && ok "currently connected is the number of running guests ($N)" \
+            || bad "currently connected is $S_NOW, but $N guests are running"
+        [ "$S_WIN" -gt "$S_NOW" ] && ok "the canary session that already ended still counts in the window" \
+            || bad "window ($S_WIN) does not count the ended canary on top of the open sessions ($S_NOW)"
+        [ "$S_EVER" -ge "$S_WIN" ] && ok "ever connected >= connected in window" \
+            || bad "ever ($S_EVER) < window ($S_WIN)"
+    fi
+fi
+
 hdr "guest is on the restricted network only"
 # every guest is inspected, not just the first: a guest is torn down the instant
 # its ssh session ends, so "docker ps | head -1" can hand back the short-lived

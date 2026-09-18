@@ -145,6 +145,41 @@ docker ps --format '{{.Ports}}' | grep -q "127.0.0.1:2223" \
 # a docker-restarted containerssh would come back after a reboot with no chains
 RP=$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' containerssh 2>/dev/null)
 [ "$RP" = "no" ] && ok "containerssh restart policy is 'no'" || bad "containerssh restart policy is '$RP' (must be 'no')"
+docker ps --format '{{.Names}} {{.Ports}}' | grep "playground-stats" | grep -q "127.0.0.1:2224" \
+    && ok "stats server up and bound to loopback" || bad "stats server not running on 127.0.0.1:2224"
+
+hdr "connection statistics"
+# the numbers themselves are checked from inside real guests by verify_guest.sh;
+# this is that the service answers, is following docker, and persists. python
+# rather than curl: curl is not a host requirement.
+STATS=$(python3 - <<'PY' 2>/dev/null
+import json, urllib.request
+with urllib.request.urlopen("http://127.0.0.1:2224/stats", timeout=5) as r:
+    s = json.load(r)
+print(s["currently_connected"], s["connected_in_window"], s["ever_connected"],
+      s["window_seconds"], s["collector"]["connected"])
+PY
+)
+if [ -z "$STATS" ]; then
+    bad "stats server did not answer on http://127.0.0.1:2224/stats"
+else
+    read -r S_NOW S_WIN S_EVER S_WINDOW S_LIVE <<< "$STATS"
+    ok "stats server answers (now=$S_NOW, last ${S_WINDOW}s=$S_WIN, ever=$S_EVER)"
+    [ "$S_LIVE" = "True" ] && ok "collector is following docker events" \
+        || bad "collector is not connected to docker - the numbers are stale"
+    [ "$S_NOW" -le "$S_WIN" ] && [ "$S_WIN" -le "$S_EVER" ] \
+        && ok "counts nest (now <= window <= ever)" \
+        || bad "counts do not nest: now=$S_NOW window=$S_WIN ever=$S_EVER"
+    W=$(python3 -c 'import json, urllib.request; print(json.load(urllib.request.urlopen("http://127.0.0.1:2224/stats?window=15m", timeout=5))["window_seconds"])' 2>/dev/null)
+    [ "$W" = "900" ] && ok "window is configurable per request (?window=15m -> 900s)" \
+        || bad "?window=15m answered '$W' instead of 900"
+    # root-owned: the service runs as root, like containerssh
+    if sudo test -f stats_data/stats.db; then
+        ok "sessions persisted in stats_data/stats.db"
+    else
+        bad "stats_data/stats.db was not written - 'ever connected' will not survive a restart"
+    fi
+fi
 
 hdr "guest-only name for the gateway"
 # researchlabs.tech is an /etc/hosts entry docker writes into every guest, rendered
