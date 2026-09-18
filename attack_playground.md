@@ -30,6 +30,11 @@ statistics* below
 (`AUTH_PORT`) and the stats server (`STATS_PORT`) - set once, here. see *one place
 for every port* below
 
+`guest_docker.dockerfile`: the guest image - ubuntu with the usual tooling (gcc, python,
+git, curl, wget, netcat, ping, nslookup and dig). `start.sh` only builds it when it is
+missing, so after editing it run `./cleanup.sh` and then `./start.sh` (or
+`docker rmi attack_playground_image:latest`) to have the change picked up.
+
 ### one place for every port
 
 the ports fall in two groups, and neither is written down twice:
@@ -480,8 +485,9 @@ then proves the policy from inside real guest containers: the host and published
 endpoints are reachable, everything else (other host ports, the internet, the lan, dns,
 icmp, the other guest over ipv4 and ipv6 link-local) is not, `researchlabs.tech` resolves
 to the gateway and reaches the same host listener while still being dropped on a port
-outside the allowlist, the guest hardening took effect, and the stats server counts
-exactly the guests it opened - the two it holds open as connected now, and the one that already ended in
+outside the allowlist, the guest hardening took effect, `nslookup` is in the image and
+comes back empty-handed like `getent`, and the stats server counts exactly the guests
+it opened - the two it holds open as connected now, and the one that already ended in
 the window. the ports it probes are the first two the config allows and the ssh port
 from `.env`, not numbers of its own. its test listener is bound to the gateway ip and serves an empty
 directory - the repo contains the ssh host private key, so it must never be what gets

@@ -172,7 +172,7 @@ if [ "$GUEST_UP" -ne 1 ]; then
              "host port $SSH_PORT" "internet" "lan by ip" "dns" "icmp to gateway" \
              "researchlabs.tech resolves to the gateway" "researchlabs.tech:$EP_HOST" \
              "researchlabs.tech:22 dropped" "/etc/hosts not writable" \
-             "disk fill"; do
+             "nslookup present" "dns via nslookup" "disk fill"; do
         err "$p - no guest session"
     done
 else
@@ -189,6 +189,8 @@ else
         curl -s -m 8 -o /dev/null https://example.com; echo NET=\$?
         nc -w 5 -z 1.1.1.1 443 > /dev/null 2>&1; echo IP=\$?
         timeout 8 getent hosts example.com > /dev/null 2>&1; echo DNS=\$?
+        command -v nslookup > /dev/null 2>&1; echo NSLOOKUP=\$?
+        command -v nslookup > /dev/null 2>&1 && { timeout 8 nslookup example.com > /dev/null 2>&1; echo NSDNS=\$?; }
         ping -c 1 -W 3 $GW > /dev/null 2>&1; echo ICMP=\$?
         dd if=/dev/zero of=/home/guestuser/fill bs=1M count=600 > /dev/null 2>&1; echo FILL=\$?; rm -f /home/guestuser/fill
         touch /usr/bin/x > /dev/null 2>&1; echo ROOTFS=\$?
@@ -257,6 +259,13 @@ else
     # host, so it is a covert channel the bridge rules never see. older engines
     # forward lookups from --internal networks; this has to fail.
     check_blocked "dns resolution fails"    DNS
+    # nslookup ships in the guest image (dnsutils in guest_docker.dockerfile) for
+    # exactly this kind of probing: it has to be there, and it has to fail
+    NSL=$(rc NSLOOKUP)
+    if   [ -z "$NSL" ];    then err "nslookup - probe did not report"
+    elif [ "$NSL" = "0" ]; then ok "nslookup is in the guest image"
+    else bad "nslookup is missing from the guest image - built before dnsutils was added? rebuild it (./cleanup.sh, then ./start.sh)"; fi
+    check_blocked "dns lookup with nslookup fails" NSDNS
     check_blocked "icmp to gateway dropped" ICMP
     # the home tmpfs is 256m: a 600m write must fail, and the image is read-only
     check_blocked "600m write to home refused (tmpfs bound)" FILL
