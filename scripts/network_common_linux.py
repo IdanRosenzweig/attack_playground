@@ -30,7 +30,7 @@ three dedicated chains are used so that setup is idempotent and teardown is exac
                     the host itself is unaffected: host-originated traffic is routed
                     through OUTPUT, not FORWARD.
 
-  ATTACK_PG_SSH     hooked from INPUT for "-p tcp --dport 2222 --syn"
+  ATTACK_PG_SSH     hooked from INPUT for "-p tcp --dport <ssh port> --syn"
                     lan -> containerssh. caps the number of concurrent ssh
                     connections, and with it the number of live guest containers.
                     the auth webhook says yes to everybody, so without this anyone
@@ -74,12 +74,13 @@ FORWARD_CHAIN = "ATTACK_PG_FWD"
 FORWARD_IN_CHAIN = "ATTACK_PG_FWD_IN"
 SSH_LIMIT_CHAIN = "ATTACK_PG_SSH"
 
-# the port containerssh is published on (docker-compose.yaml) and how many ssh
-# connections may be open at once, over all sources. every connection is a guest
-# container with the memory reservation in config.yaml, so this is the cap on
-# what the lan can make the host spend.
-SSH_PORT = 2222
+# how many ssh connections may be open at once, over all sources. every
+# connection is a guest container with the memory reservation in config.yaml, so
+# this is the cap on what the lan can make the host spend. the port it is keyed
+# on is the one containerssh is published on, which .env sets and start.sh passes
+# in as SSH_PORT - see ssh_port_from_env().
 MAX_SSH_CONNECTIONS = 32
+SSH_PORT_ENV = "SSH_PORT"
 
 # bridged traffic only reaches iptables / ip6tables when the matching sysctl is
 # on. docker turns on the ipv4 one itself for an ipv4 network and leaves the ipv6
@@ -206,7 +207,8 @@ def get_subnet(network_name):
 
 
 def port_arg(port_range):
-    """turn '1337-1355' into iptables' '1337:1355'. a bare port is passed through."""
+    """turn a range like '9100-9109' into iptables' '9100:9109'. a bare port is passed
+    through. the numbers here are examples - the real ones come from the config file."""
     if '-' in port_range:
         start, end = port_range.split('-', 1)
         return f"{start}:{end}"
@@ -430,7 +432,8 @@ def remove_legacy_rules(bridge_if, gateway_ip, ranges):
 # ------------------------------------------------- published endpoint shadowing
 
 def range_bounds(port_range):
-    """turn '1337-1355' (or a bare '1337') into an inclusive (start, end) pair."""
+    """turn a range like '9100-9109' (or a bare '9100') into an inclusive (start, end)
+    pair. examples, not config values - the ranges come from the config file."""
     if '-' in port_range:
         start, end = port_range.split('-', 1)
         return int(start), int(end)
@@ -449,10 +452,10 @@ def parse_published_ports(rules):
 
     docker writes one rule per published port into nat/DOCKER:
 
-      -A DOCKER ! -i br-x -p tcp -m tcp --dport 1337 -j DNAT --to-destination 172.18.0.15:1337
+      -A DOCKER ! -i br-x -p tcp -m tcp --dport 9100 -j DNAT --to-destination 172.18.0.15:9100
 
-    a publish bound to loopback ("-d 127.0.0.1/32", i.e. "127.0.0.1:2223:8080") can
-    never be hit from the bridge, so it is not a conflict and is skipped here.
+    a publish bound to loopback ("-d 127.0.0.1/32", i.e. "127.0.0.1:<host>:<container>")
+    can never be hit from the bridge, so it is not a conflict and is skipped here.
     """
     published = []
     for line in rules:
@@ -480,7 +483,7 @@ def endpoint_conflicts(ranges, published):
     shadowed: it keeps its socket and stops receiving guest connections.
 
     the connection still succeeds, which is exactly why this has to be reported.
-    "nc -z <gateway> 1337" cannot tell the host listener from the container that
+    "nc -z <gateway> <port>" cannot tell the host listener from the container that
     took the port over, so an endpoint the operator believes is a host service is
     quietly a container, and the check that was meant to exercise the INPUT
     allowlist exercises the FORWARD one twice instead.
@@ -518,13 +521,33 @@ def _valid_port(value):
         return False
 
 
+def ssh_port_from_env(environ=None):
+    """
+    the host port containerssh is published on, from the SSH_PORT variable that
+    start.sh passes through from .env.
+
+    the connection cap is keyed on it, so a missing or malformed value is an error
+    rather than a fallback: a cap on the wrong port is no cap at all, and nothing
+    would say so.
+    """
+    value = (os.environ if environ is None else environ).get(SSH_PORT_ENV)
+    if value is None:
+        problem = "not set"
+    elif not _valid_port(value):
+        problem = f"{value!r}, which is not a port number"
+    else:
+        return int(value)
+    raise ValueError(f"{SSH_PORT_ENV} is {problem}. start.sh sets it from .env;"
+                     " bring the playground up through start.sh")
+
+
 def parse_config(config_path):
     """
     read port ranges from config file, ignoring comments and blank lines.
 
-    ports are range-checked here rather than left to iptables. "70000" or "1337-99999"
-    matches the digit patterns below but is rejected by iptables with "invalid
-    port/service", which used to abort the rebuild half way through the chain.
+    ports are range-checked here rather than left to iptables. an entry like "70000" or
+    "1000-99999" matches the digit patterns below but is rejected by iptables with
+    "invalid port/service", which used to abort the rebuild half way through the chain.
     """
     if not os.path.exists(config_path):
         return []

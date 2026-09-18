@@ -30,8 +30,13 @@ docker:
       networkmode: "attack_playground_net"
 
       # container.HostConfig.ExtraHosts - "<name>:<ip>" pairs docker writes into the
-      # guest's /etc/hosts. "researchlabs.tech" is the playground's own name for the
+      # guest's /etc/hosts. the entry below is the playground's own name for the
       # bridge gateway, which is the address the attack endpoints are exposed on.
+      #
+      # this line is where that name is defined, and the only place it is spelled
+      # out. the scripts and the verify suite read it back from here through
+      # "scripts/render_config.py hostname", so renaming it is an edit to this line
+      # alone.
       #
       # a hosts entry rather than a dns record, for three reasons:
       #   * it exists only inside a guest. the host's resolver, the containerssh and
@@ -45,9 +50,9 @@ docker:
       #   * the guest cannot edit it. with readonlyrootfs docker mounts /etc/hosts
       #     read-only, so the name means the same thing for the whole session.
       #
-      # the name is an alias, not a permission: researchlabs.tech:1337 is allowed
-      # because tcp/1337 on the gateway is, and researchlabs.tech:22 is dropped
-      # exactly like the gateway ip on 22.
+      # the name is an alias, not a permission: <name>:<port> is allowed exactly when
+      # tcp/<port> on the gateway is, so the name on tcp/22 is dropped just like the
+      # gateway ip on 22. nothing in the iptables policy knows about the name.
       #
       # __GATEWAY_IP__ is filled in by scripts/render_config.py, which start.sh runs
       # once the network exists - docker picks the subnet when it creates the network,
@@ -58,8 +63,8 @@ docker:
 
       # A guest is an untrusted shell that anyone on the lan can open. Everything
       # below bounds what one guest - or a lan full of them - can cost the host.
-      # The concurrency cap itself is an iptables connlimit on port 2222, see
-      # scripts/setup_networking_linux.py.
+      # The concurrency cap itself is an iptables connlimit on the published ssh
+      # port (SSH_PORT in .env), see scripts/setup_networking_linux.py.
 
       # container.HostConfig.ReadonlyRootfs - the image is immutable; the only
       # writable places are the tmpfs mounts below, which are bounded in size and

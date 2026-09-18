@@ -5,6 +5,11 @@
 
 cd "$(dirname "$0")"
 
+# the published ports (.env) and the stats helper
+# shellcheck source=scripts/common.sh
+source scripts/common.sh
+load_ports || exit 1
+
 PASS=0; FAIL=0
 ok()   { echo "  PASS: $*"; PASS=$((PASS+1)); }
 bad()  { echo "  FAIL: $*"; FAIL=$((FAIL+1)); }
@@ -17,6 +22,14 @@ trap 'rm -rf "$WORK"' EXIT
 
 GUEST_IMAGE="attack_playground_image:latest"
 NET="attack_playground_net"
+
+# the guests' name for the gateway, read out of config.yaml's extrahosts entry -
+# the one place it is defined - rather than spelled out again here
+GUEST_HOST=$(python3 scripts/render_config.py hostname 2>/dev/null)
+if [ -z "$GUEST_HOST" ]; then
+    echo "error: config.yaml has no gateway hosts entry - nothing to verify the name against"
+    exit 1
+fi
 
 hdr "unit tests"
 if python3 -m unittest discover -s scripts -p 'test_*.py' > "$WORK/unit.log" 2>&1; then
@@ -51,15 +64,23 @@ done
 # the allowlist must be in INPUT, and must name the gateway ip
 GW=$(docker network inspect "$NET" -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null)
 echo "  (gateway: $GW)"
-sudo iptables -S ATTACK_PG_INPUT | grep -q "dports\? 1337:1355" \
-    && ok "endpoint range 1337-1355 allowed" || bad "endpoint range not in chain"
+# every range the config allows, read through the parser the setup used: the
+# expectation follows attack_network_endpoints.conf rather than a copy of it
+RANGES=$(python3 scripts/endpoints.py ranges 2>/dev/null)
+[ -n "$RANGES" ] || bad "attack_network_endpoints.conf allows no ports - nothing to verify against"
+for R in $RANGES; do
+    sudo iptables -S ATTACK_PG_INPUT | grep -qE -- "--dports? $R( |$)" \
+        && ok "endpoint range $R allowed" || bad "endpoint range $R not in ATTACK_PG_INPUT"
+done
 sudo iptables -S ATTACK_PG_INPUT | grep -q -- "-d $GW" \
     && ok "allow rules are scoped to the gateway ip" || bad "allow rules not scoped to gateway"
 
 # a docker-published endpoint is DNATed and forwarded, so the same allowlist must
 # also exist in the forward chain keyed on the *original* destination
-sudo iptables -S ATTACK_PG_FWD | grep -q -- "--ctstate DNAT.*--ctorigdst $GW.*--ctorigdstport 1337:1355" \
-    && ok "published endpoints allowed through FORWARD" || bad "no DNAT allow in ATTACK_PG_FWD"
+for R in $RANGES; do
+    sudo iptables -S ATTACK_PG_FWD | grep -qE -- "--ctstate DNAT.*--ctorigdst $GW.*--ctorigdstport $R( |$)" \
+        && ok "published endpoints in $R allowed through FORWARD" || bad "no DNAT allow for $R in ATTACK_PG_FWD"
+done
 sudo iptables -S ATTACK_PG_FWD_IN | grep -qE -- "--ctstate (RELATED,ESTABLISHED|ESTABLISHED,RELATED)" \
     && ok "replies to guest connections allowed back" || bad "no ESTABLISHED allow in ATTACK_PG_FWD_IN"
 
@@ -69,7 +90,7 @@ sudo iptables -S ATTACK_PG_SSH | grep -q -- "--connlimit-above" \
 
 hdr "hooks are live"
 sudo iptables -S INPUT | grep -q "ATTACK_PG_INPUT" && ok "INPUT -> ATTACK_PG_INPUT" || bad "INPUT hook missing"
-sudo iptables -S INPUT | grep -q -- "--dport 2222.*ATTACK_PG_SSH" && ok "INPUT -> ATTACK_PG_SSH" || bad "ssh cap hook missing"
+sudo iptables -S INPUT | grep -q -- "--dport $SSH_PORT .*ATTACK_PG_SSH" && ok "INPUT -> ATTACK_PG_SSH (port $SSH_PORT)" || bad "ssh cap hook missing on port $SSH_PORT"
 sudo iptables -S DOCKER-USER | grep -q "ATTACK_PG_FWD" && ok "DOCKER-USER -> ATTACK_PG_FWD" || bad "forward hook missing"
 sudo iptables -n -L DOCKER-USER | head -1 | grep -q "0 references" \
     && bad "DOCKER-USER has 0 references (chain is dead)" || ok "DOCKER-USER is referenced"
@@ -140,28 +161,22 @@ done
 
 hdr "services"
 docker ps --format '{{.Names}}' | grep -q containerssh && ok "containerssh up" || bad "containerssh not running"
-docker ps --format '{{.Ports}}' | grep -q "127.0.0.1:2223" \
-    && ok "auth webhook bound to loopback" || bad "auth webhook not on loopback"
+docker ps --format '{{.Ports}}' | grep -q "127.0.0.1:$AUTH_PORT->" \
+    && ok "auth webhook bound to loopback ($AUTH_PORT)" || bad "auth webhook not on 127.0.0.1:$AUTH_PORT"
 # a docker-restarted containerssh would come back after a reboot with no chains
 RP=$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' containerssh 2>/dev/null)
 [ "$RP" = "no" ] && ok "containerssh restart policy is 'no'" || bad "containerssh restart policy is '$RP' (must be 'no')"
-docker ps --format '{{.Names}} {{.Ports}}' | grep "playground-stats" | grep -q "127.0.0.1:2224" \
-    && ok "stats server up and bound to loopback" || bad "stats server not running on 127.0.0.1:2224"
+docker ps --format '{{.Names}} {{.Ports}}' | grep "playground-stats" | grep -q "127.0.0.1:$STATS_PORT->" \
+    && ok "stats server up and bound to loopback ($STATS_PORT)" || bad "stats server not running on 127.0.0.1:$STATS_PORT"
 
 hdr "connection statistics"
 # the numbers themselves are checked from inside real guests by verify_guest.sh;
-# this is that the service answers, is following docker, and persists. python
-# rather than curl: curl is not a host requirement.
-STATS=$(python3 - <<'PY' 2>/dev/null
-import json, urllib.request
-with urllib.request.urlopen("http://127.0.0.1:2224/stats", timeout=5) as r:
-    s = json.load(r)
-print(s["currently_connected"], s["connected_in_window"], s["ever_connected"],
-      s["window_seconds"], s["collector"]["connected"])
-PY
-)
+# this is that the service answers on the port .env publishes it on, is
+# following docker, and persists. stats_fields is in scripts/common.sh.
+STATS=$(stats_fields /stats currently_connected connected_in_window ever_connected \
+                     window_seconds collector.connected)
 if [ -z "$STATS" ]; then
-    bad "stats server did not answer on http://127.0.0.1:2224/stats"
+    bad "stats server did not answer on http://127.0.0.1:$STATS_PORT/stats"
 else
     read -r S_NOW S_WIN S_EVER S_WINDOW S_LIVE <<< "$STATS"
     ok "stats server answers (now=$S_NOW, last ${S_WINDOW}s=$S_WIN, ever=$S_EVER)"
@@ -170,7 +185,7 @@ else
     [ "$S_NOW" -le "$S_WIN" ] && [ "$S_WIN" -le "$S_EVER" ] \
         && ok "counts nest (now <= window <= ever)" \
         || bad "counts do not nest: now=$S_NOW window=$S_WIN ever=$S_EVER"
-    W=$(python3 -c 'import json, urllib.request; print(json.load(urllib.request.urlopen("http://127.0.0.1:2224/stats?window=15m", timeout=5))["window_seconds"])' 2>/dev/null)
+    W=$(stats_fields '/stats?window=15m' window_seconds)
     [ "$W" = "900" ] && ok "window is configurable per request (?window=15m -> 900s)" \
         || bad "?window=15m answered '$W' instead of 900"
     # root-owned: the service runs as root, like containerssh
@@ -181,9 +196,9 @@ else
     fi
 fi
 
-hdr "guest-only name for the gateway"
-# researchlabs.tech is an /etc/hosts entry docker writes into every guest, rendered
-# from config.yaml with the gateway ip this run's network actually got. config.yaml
+hdr "guest-only name for the gateway ($GUEST_HOST)"
+# the name is an /etc/hosts entry docker writes into every guest, rendered from
+# config.yaml with the gateway ip this run's network actually got. config.yaml
 # itself keeps the placeholder - what containerssh reads is the rendered copy, so
 # check that one, and check it is really the file that was mounted.
 if [ ! -f config.runtime.yaml ]; then
@@ -194,11 +209,11 @@ else
     else
         ok "no unrendered placeholder in config.runtime.yaml"
     fi
-    if grep -qF "\"researchlabs.tech:$GW\"" config.runtime.yaml; then
-        ok "researchlabs.tech -> $GW (this run's gateway)"
+    if grep -qF "\"$GUEST_HOST:$GW\"" config.runtime.yaml; then
+        ok "$GUEST_HOST -> $GW (this run's gateway)"
     else
-        bad "config.runtime.yaml does not map researchlabs.tech to $GW"
-        grep -n "researchlabs" config.runtime.yaml
+        bad "config.runtime.yaml does not map $GUEST_HOST to $GW"
+        grep -n "extrahosts" -A2 config.runtime.yaml
     fi
 fi
 if docker inspect containerssh -f '{{range .Mounts}}{{.Source}} {{end}}' 2>/dev/null \
@@ -208,12 +223,12 @@ else
     bad "containerssh is not mounting config.runtime.yaml - it is running an unrendered config"
 fi
 # and the entry is supposed to exist inside the guests and nowhere else. checked
-# against the gateway ip rather than "does not resolve at all": researchlabs.tech is
-# a real domain name, and a host with a resolver may well have an answer for it.
-if getent hosts researchlabs.tech 2>/dev/null | grep -q "$GW"; then
-    bad "the host itself resolves researchlabs.tech to $GW - that entry belongs in the guests only"
+# against the gateway ip rather than "does not resolve at all": the name is a real
+# domain name, and a host with a resolver may well have an answer for it.
+if getent hosts "$GUEST_HOST" 2>/dev/null | grep -q "$GW"; then
+    bad "the host itself resolves $GUEST_HOST to $GW - that entry belongs in the guests only"
 else
-    ok "the host does not resolve researchlabs.tech to the gateway"
+    ok "the host does not resolve $GUEST_HOST to the gateway"
 fi
 
 hdr "persisted rules"
