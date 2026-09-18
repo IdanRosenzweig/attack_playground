@@ -23,6 +23,14 @@ if docker network inspect "$DOCKER_NET_NAME" &> /dev/null; then
     docker network rm "$DOCKER_NET_NAME"
 fi
 
+# remove the rendered containerssh config.
+# it carries the gateway ip of the network removed above, so it is stale from here
+# on; start.sh writes it again against whatever gateway the next network gets.
+if [ -f config.runtime.yaml ]; then
+    echo "removing rendered containerssh config..."
+    rm -f config.runtime.yaml
+fi
+
 # remove docker image
 GUEST_DOCKER_IMAGE_NAME="attack_playground_image:latest"
 if docker image inspect "$GUEST_DOCKER_IMAGE_NAME" &> /dev/null; then

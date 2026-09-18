@@ -146,6 +146,41 @@ docker ps --format '{{.Ports}}' | grep -q "127.0.0.1:2223" \
 RP=$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' containerssh 2>/dev/null)
 [ "$RP" = "no" ] && ok "containerssh restart policy is 'no'" || bad "containerssh restart policy is '$RP' (must be 'no')"
 
+hdr "guest-only name for the gateway"
+# researchlabs.tech is an /etc/hosts entry docker writes into every guest, rendered
+# from config.yaml with the gateway ip this run's network actually got. config.yaml
+# itself keeps the placeholder - what containerssh reads is the rendered copy, so
+# check that one, and check it is really the file that was mounted.
+if [ ! -f config.runtime.yaml ]; then
+    bad "config.runtime.yaml was not rendered (start.sh renders it from config.yaml)"
+else
+    if grep -q "__GATEWAY_IP__" config.runtime.yaml; then
+        bad "config.runtime.yaml still holds the __GATEWAY_IP__ placeholder - guests would fail to start"
+    else
+        ok "no unrendered placeholder in config.runtime.yaml"
+    fi
+    if grep -qF "\"researchlabs.tech:$GW\"" config.runtime.yaml; then
+        ok "researchlabs.tech -> $GW (this run's gateway)"
+    else
+        bad "config.runtime.yaml does not map researchlabs.tech to $GW"
+        grep -n "researchlabs" config.runtime.yaml
+    fi
+fi
+if docker inspect containerssh -f '{{range .Mounts}}{{.Source}} {{end}}' 2>/dev/null \
+     | grep -q "config.runtime.yaml"; then
+    ok "containerssh is running with the rendered config"
+else
+    bad "containerssh is not mounting config.runtime.yaml - it is running an unrendered config"
+fi
+# and the entry is supposed to exist inside the guests and nowhere else. checked
+# against the gateway ip rather than "does not resolve at all": researchlabs.tech is
+# a real domain name, and a host with a resolver may well have an answer for it.
+if getent hosts researchlabs.tech 2>/dev/null | grep -q "$GW"; then
+    bad "the host itself resolves researchlabs.tech to $GW - that entry belongs in the guests only"
+else
+    ok "the host does not resolve researchlabs.tech to the gateway"
+fi
+
 hdr "persisted rules"
 # netfilter-persistent would freeze docker's dynamic rules into a file that is
 # restored before dockerd starts; the systemd unit re-runs start.sh instead

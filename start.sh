@@ -68,6 +68,21 @@ if ! as_root env PYTHONPATH="$SCRIPT_DIR/scripts" python3 "$SCRIPT_DIR/scripts/s
     exit 1
 fi
 
+# render the containerssh config for this run.
+#
+# guests resolve "researchlabs.tech" to the gateway of the network created above
+# through an /etc/hosts entry containerssh asks docker for, and docker only numbers
+# that network when it creates it - so the address cannot live in the tracked
+# config.yaml. this fills it in; compose mounts the rendered copy.
+#
+# it runs after the network exists and before the services come up: containerssh
+# reads its config once, at startup.
+echo "rendering containerssh config..."
+if ! env PYTHONPATH="$SCRIPT_DIR/scripts" python3 "$SCRIPT_DIR/scripts/render_config.py"; then
+    echo "error: failed to render the containerssh config, refusing to start the playground"
+    exit 1
+fi
+
 # launch services
 echo "launching services..."
 compose up -d
