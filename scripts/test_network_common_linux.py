@@ -369,5 +369,95 @@ class EndpointShadowingTest(unittest.TestCase):
             self.assertEqual(nc.find_endpoint_conflicts(["9100-9109"]), [])
 
 
+class HostListenerTest(unittest.TestCase):
+    """
+    a published port inside an endpoint range is only a fault when the host is
+    serving that port too - otherwise the container simply is the endpoint, which
+    is supported. the socket table is what separates the two.
+    """
+
+    GATEWAY = "172.24.0.1"
+
+    # what "ss -lntp" actually prints
+    LISTENERS = [
+        "State  Recv-Q Send-Q Local Address:Port  Peer Address:Port  Process",
+        'LISTEN 0      4096   0.0.0.0:2222        0.0.0.0:*          '
+        'users:(("docker-proxy",pid=811,fd=4))',
+        'LISTEN 0      4096   172.24.0.1:9100     0.0.0.0:*          '
+        'users:(("python3",pid=900,fd=3))',
+        'LISTEN 0      128    127.0.0.1:9101      0.0.0.0:*          '
+        'users:(("nc",pid=901,fd=3))',
+        'LISTEN 0      511    *:9102              *:*                '
+        'users:(("nginx",pid=902,fd=6))',
+        'LISTEN 0      128    [::]:9103           [::]:*             '
+        'users:(("sshd",pid=903,fd=4))',
+    ]
+
+    def listeners(self):
+        return nc.parse_listeners(self.LISTENERS)
+
+    def test_parses_address_port_and_process(self):
+        self.assertIn(("172.24.0.1", 9100, "python3"), self.listeners())
+
+    def test_skips_the_header_row(self):
+        self.assertEqual(len(self.listeners()), 5)
+
+    def test_docker_proxy_is_not_a_host_service(self):
+        # docker's userland proxy holds every published host port open. counting it
+        # would make every published endpoint look like it shadows something.
+        self.assertNotIn(2222, nc.host_listener_ports(self.GATEWAY, self.listeners()))
+
+    def test_loopback_listener_does_not_shadow(self):
+        # a guest cannot reach 127.0.0.1 on the host, so nothing of its was taken
+        self.assertNotIn(9101, nc.host_listener_ports(self.GATEWAY, self.listeners()))
+
+    def test_gateway_and_wildcard_listeners_count(self):
+        # "[::]" included: a dual-stack socket accepts ipv4 connections too
+        self.assertEqual(
+            nc.host_listener_ports(self.GATEWAY, self.listeners()), {9100, 9102, 9103})
+
+    def test_listener_on_another_address_does_not_count(self):
+        listeners = [("10.0.0.5", 9100, "python3")]
+        self.assertEqual(nc.host_listener_ports(self.GATEWAY, listeners), set())
+
+    def test_classify_splits_shadowed_from_containerised(self):
+        conflicts = [(9100, "172.18.0.15:9100", "9100-9109"),
+                     (9105, "172.18.0.16:1337", "9100-9109")]
+        shadowing, containerised = nc.classify_conflicts(conflicts, {9100})
+        self.assertEqual([p for p, _, _ in shadowing], [9100])
+        self.assertEqual([p for p, _, _ in containerised], [9105])
+
+    def test_unreadable_socket_table_reports_every_conflict(self):
+        # not knowing must not read as "nothing is listening": the check exists
+        # because a shadowed endpoint is invisible from a guest
+        conflicts = [(9100, "172.18.0.15:9100", "9100-9109")]
+        with mock.patch.object(nc, "find_endpoint_conflicts", return_value=conflicts), \
+                mock.patch.object(nc.subprocess, "check_output",
+                                  side_effect=FileNotFoundError):
+            shadowing, containerised, known = nc.find_shadowed_endpoints(
+                ["9100-9109"], self.GATEWAY)
+        self.assertEqual(shadowing, conflicts)
+        self.assertEqual(containerised, [])
+        self.assertFalse(known)
+
+    def test_no_conflict_does_not_read_the_socket_table(self):
+        with mock.patch.object(nc, "find_endpoint_conflicts", return_value=[]), \
+                mock.patch.object(nc, "find_host_listeners") as listeners:
+            self.assertEqual(nc.find_shadowed_endpoints(["9100-9109"], self.GATEWAY),
+                             ([], [], True))
+        listeners.assert_not_called()
+
+    def test_containerised_endpoint_is_not_a_failure(self):
+        # the whole point: a playground whose endpoints are all containers is clean
+        conflicts = [(9100, "172.18.0.15:1337", "9100-9109")]
+        with mock.patch.object(nc, "find_endpoint_conflicts", return_value=conflicts), \
+                mock.patch.object(nc, "find_host_listeners", return_value=(set(), True)):
+            shadowing, containerised, known = nc.find_shadowed_endpoints(
+                ["9100-9109"], self.GATEWAY)
+        self.assertEqual(shadowing, [])
+        self.assertEqual(containerised, conflicts)
+        self.assertTrue(known)
+
+
 if __name__ == "__main__":
     unittest.main()

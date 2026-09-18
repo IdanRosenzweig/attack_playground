@@ -102,22 +102,53 @@ hdr "endpoint shadowing"
 # rewritten to the container before the routing decision, travels FORWARD, and the
 # INPUT allowlist never sees it. the connection still succeeds, so a "nc -z" probe
 # cannot tell the two apart - this check reads the nat table instead.
-SHADOW=$(python3 - <<'PY' 2>/dev/null
+#
+# a container on such a port is only a *fault* when the host is serving it too.
+# running an endpoint as a published container is supported, so the socket table
+# decides which of the two it is: a host listener on the gateway ip (or on a
+# wildcard) means a shadowed service, nothing bound there means the container is
+# the endpoint. an unreadable socket table is itself a failure - it cannot tell
+# them apart, and this is invisible from a guest.
+SHADOW=$(python3 - "$GW" <<'PY' 2>/dev/null
 import os, sys
 sys.path.insert(0, os.path.join(os.getcwd(), "scripts"))
 import network_common_linux as nc
 config = nc.find_config()
 ranges = nc.parse_config(config) if config else []
-for host_port, target, rng in nc.find_endpoint_conflicts(ranges):
-    print(host_port, target, rng)
+shadowing, containerised, known = nc.find_shadowed_endpoints(ranges, sys.argv[1])
+if not known:
+    print("UNKNOWN 0 - -")
+for kind, found in (("SHADOW", shadowing), ("CONTAINER", containerised)):
+    for host_port, target, rng in found:
+        print(kind, host_port, target, rng)
 PY
 )
-if [ -z "$SHADOW" ]; then
-    ok "no configured endpoint is shadowed by a published container port"
+if grep -q "^UNKNOWN " <<< "$SHADOW"; then
+    # one failure, not one per port: nothing here is known to be wrong, what is
+    # wrong is that the check cannot answer
+    bad "could not read the socket table (iproute2 missing?) - these published ports may or may not be shadowing a host service:"
+    while read -r kind port target rng; do
+        [ "$kind" = "SHADOW" ] || continue
+        echo "         tcp $port -> $target (range $rng)"
+    done <<< "$SHADOW"
+elif grep -q "^SHADOW " <<< "$SHADOW"; then
+    while read -r kind port target rng; do
+        [ "$kind" = "SHADOW" ] || continue
+        bad "tcp $port (endpoint range $rng) is published by $target while a host process is listening on it - dialling the gateway there reaches the container, not the host, and skips ATTACK_PG_INPUT"
+    done <<< "$SHADOW"
 else
-    while read -r port target rng; do
-        [ -z "$port" ] && continue
-        bad "tcp $port (endpoint range $rng) is published by $target - dialling the gateway there reaches the container, not the host, and skips ATTACK_PG_INPUT"
+    ok "no configured endpoint is shadowed by a published container port"
+fi
+
+# not a failure: an endpoint that is a published container is a supported way to
+# run one, and ATTACK_PG_FWD allows exactly it. reported so that "endpoint" and
+# "host service" are not silently taken for the same thing.
+CTRS=$(grep -c "^CONTAINER " <<< "$SHADOW")
+if [ "$CTRS" -gt 0 ]; then
+    echo "       $CTRS endpoint(s) served by a published container, not by the host:"
+    while read -r kind port target rng; do
+        [ "$kind" = "CONTAINER" ] || continue
+        echo "         tcp $port -> $target (range $rng)"
     done <<< "$SHADOW"
 fi
 
