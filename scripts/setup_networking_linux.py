@@ -20,7 +20,7 @@ from network_common_linux import (
     ensure_chain, ensure_chain_closed, ensure_hook, ensure_jump,
     ensure_docker_user_chain,
     ensure_bridge_netfilter, ip6tables_available, remove_legacy_rules,
-    parse_config, find_config, find_endpoint_conflicts,
+    parse_config, find_config, find_shadowed_endpoints,
 )
 
 CHAINS = (INPUT_CHAIN, FORWARD_CHAIN, FORWARD_IN_CHAIN)
@@ -150,31 +150,49 @@ def apply_ipv6_restrictions(bridge_if, ssh_port):
     return True
 
 
-def report_endpoint_conflicts(ranges):
+def report_endpoint_conflicts(ranges, gateway_ip):
     """
-    warn when a container publishes a host port inside an endpoint range.
+    warn when a host endpoint is shadowed by a container that published its port.
 
-    that port stops being a host endpoint: docker's DNAT rule in nat/PREROUTING runs
-    before the routing decision, so the guest is rewritten to the container and
-    forwarded, and ATTACK_PG_INPUT - the allowlist that is supposed to guard host
-    endpoints - never sees the packet. the connection still succeeds, so nothing
-    downstream notices; only the operator's idea of what is on that port is wrong.
+    a container publishing a host port inside an endpoint range takes that port
+    over: docker's DNAT rule in nat/PREROUTING runs before the routing decision,
+    so the guest is rewritten to the container and forwarded, and ATTACK_PG_INPUT -
+    the allowlist that is supposed to guard host endpoints - never sees the packet.
 
-    this is a warning rather than a failure. publishing an endpoint as a container
-    is a supported way to run one (build_forward_chains allows exactly that), and
+    that is only a problem when the host is *also* serving the port, which the nat
+    table alone cannot tell: publishing an endpoint as a container is a supported
+    way to run one (build_forward_chains allows exactly that), and on a playground
+    whose endpoints are all containers every single one would warn. so the socket
+    table decides. nothing bound on the host means the container is the endpoint,
+    and that is reported as what it is rather than as a warning.
+
     the policy is not widened either way - the FORWARD allow is still keyed on the
     original destination being an allowed port on the gateway. what is not supported
-    is doing it *by accident* on a port the host is also serving.
+    is a container taking a port the host is serving, silently: the connection still
+    succeeds, so nothing downstream notices, and only the operator's idea of what is
+    on that port is wrong.
     """
-    conflicts = find_endpoint_conflicts(ranges)
-    for host_port, target, rng in conflicts:
+    shadowing, containerised, known = find_shadowed_endpoints(ranges, gateway_ip)
+
+    for host_port, target, rng in shadowing:
         print(f"  warning: tcp {host_port} (in endpoint range {rng}) is published by a"
               f" container at {target}.")
         print("           guests dialling the gateway on that port are DNATed to the"
               " container before INPUT,")
         print("           so ATTACK_PG_INPUT never sees them and a host service on that"
               " port is shadowed.")
-    return conflicts
+    if shadowing and not known:
+        print("           (could not read the socket table, so this is every published"
+              " endpoint, not")
+        print("            only the shadowed ones - install iproute2 to tell them apart.)")
+
+    if containerised:
+        print(f"  {len(containerised)} endpoint(s) are served by a published container"
+              " rather than by the host:")
+        for host_port, target, _ in containerised:
+            print(f"    tcp {host_port} -> {target}")
+
+    return shadowing
 
 
 def apply_restrictions(bridge_if, gateway_ip, ranges, ssh_port):
@@ -218,7 +236,7 @@ def apply_restrictions(bridge_if, gateway_ip, ranges, ssh_port):
 
     apply_ipv6_restrictions(bridge_if, ssh_port)
 
-    report_endpoint_conflicts(ranges)
+    report_endpoint_conflicts(ranges, gateway_ip)
 
     # the rules are deliberately *not* persisted with netfilter-persistent: that
     # would also freeze docker's own dynamic nat/filter rules into a file that is

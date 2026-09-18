@@ -511,6 +511,109 @@ def find_endpoint_conflicts(ranges):
     return endpoint_conflicts(ranges, parse_published_ports(out.splitlines()))
 
 
+# a published port is only *shadowing* something if the host is serving that port
+# too. docker's own userland proxy holds every published host port open, so it is
+# skipped here - counting it would make every published endpoint look shadowed.
+PUBLISH_PROXY_PROCESSES = ("docker-proxy",)
+
+# listener addresses that cover the gateway ip as well. "[::]" is included
+# because a dual-stack socket accepts ipv4 connections (net.ipv6.bindv6only=0,
+# the default); a listener on 127.0.0.1 is not, and is not reachable from a guest.
+WILDCARD_ADDRESSES = ("0.0.0.0", "*", "::", "[::]")
+
+_LISTEN_LOCAL_RE = re.compile(r"^\s*LISTEN\s+\S+\s+\S+\s+(\S+)")
+_LISTEN_PROCESS_RE = re.compile(r'users:\(\("([^"]+)"')
+
+
+def parse_listeners(lines):
+    """
+    pull (address, port, process) out of "ss -lntp" output.
+
+      LISTEN 0 4096 0.0.0.0:2222 0.0.0.0:* users:(("docker-proxy",pid=811,fd=4))
+
+    the process name is None when ss could not name it, which is what an
+    unprivileged run gives for everyone else's sockets - see find_host_listeners().
+    """
+    listeners = []
+    for line in lines:
+        local = _LISTEN_LOCAL_RE.match(line)
+        if not local:
+            continue
+        address, _, port = local.group(1).rpartition(":")
+        if not port.isdigit():
+            continue
+        process = _LISTEN_PROCESS_RE.search(line)
+        listeners.append((address, int(port), process.group(1) if process else None))
+    return listeners
+
+
+def host_listener_ports(gateway_ip, listeners):
+    """
+    the tcp ports a host process is listening on *at an address a guest can reach*.
+
+    that is the gateway ip itself or a wildcard. docker's publish proxy is not a
+    host service - it is the other end of the DNAT - so it does not count.
+    """
+    return {port for address, port, process in listeners
+            if process not in PUBLISH_PROXY_PROCESSES
+            and (address == gateway_ip or address in WILDCARD_ADDRESSES)}
+
+
+def find_host_listeners(gateway_ip):
+    """
+    host_listener_ports() against the live socket table. returns (ports, known).
+
+    `known` is False when the table could not be read at all - no ss, or it failed.
+    the caller must not read that as "nothing is listening": it cannot tell a
+    shadowed endpoint from a containerised one, and should say so rather than go
+    quiet. ss is run privileged because the process name behind each socket is what
+    separates docker's publish proxy from a real host service, and an unprivileged
+    ss only names sockets owned by the caller.
+    """
+    try:
+        out = subprocess.check_output(
+            _privileged_prefix() + ["ss", "-lntp"],
+            text=True, stderr=subprocess.DEVNULL)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return set(), False
+    return host_listener_ports(gateway_ip, parse_listeners(out.splitlines())), True
+
+
+def classify_conflicts(conflicts, host_ports):
+    """
+    split published-in-range ports into the two cases that look identical in the
+    nat table but mean opposite things.
+
+      shadowing     - the host is listening on that port too, so a service the
+                      operator believes is the endpoint has quietly stopped
+                      receiving guest connections. a problem.
+      containerised - nothing on the host is bound there, so the container *is*
+                      the endpoint. a supported way to run one - build_forward_chains()
+                      allows exactly this - and not worth a warning.
+    """
+    shadowing = [c for c in conflicts if c[0] in host_ports]
+    containerised = [c for c in conflicts if c[0] not in host_ports]
+    return shadowing, containerised
+
+
+def find_shadowed_endpoints(ranges, gateway_ip):
+    """
+    the live answer: (shadowing, containerised, known) triples-lists plus whether
+    the socket table could be read.
+
+    when it could not, every conflict comes back as shadowing and `known` is False:
+    an unreadable socket table means we cannot rule out a host listener, and the
+    check exists precisely because this is invisible from a guest.
+    """
+    conflicts = find_endpoint_conflicts(ranges)
+    if not conflicts:
+        return [], [], True
+    host_ports, known = find_host_listeners(gateway_ip)
+    if not known:
+        return conflicts, [], False
+    return (*classify_conflicts(conflicts, host_ports), True)
+
+
 # ------------------------------------------------------------------- config io
 
 def _valid_port(value):
